@@ -18,7 +18,8 @@ recording:
   sample_rate: 16000
   channels: 1
   # 每块音频时长(毫秒)，用于流式传输
-  chunk_ms: 40
+  # 建议: 80-160ms 可降低 CPU 占用，40ms 延迟最低但 CPU 占用高
+  chunk_ms: 80
   # 最长录音时长(秒)
   max_duration: 30
 
@@ -34,6 +35,14 @@ xunfei:
   accent: "mandarin"
   # 语音结束静默时长(毫秒), 越大支持越长的停顿, 默认5000
   vad_eos: 5000
+  # 音频队列最大长度，0 表示无限制
+  max_audio_queue_size: 400
+  # 批量发送音频块数量，增大可降低 CPU 占用（建议 4-8）
+  batch_chunks: 4
+  # 是否复用 WebSocket 连接；默认关闭，真实 API 校准通过后可开启
+  reuse_connection: false
+  # 松开热键后等待服务端最终结果的最长秒数；没有中间结果时建议 2-3 秒保证稳定
+  final_result_timeout: 3.0
 
 # 腾讯语音识别配置 (备选)
 # 获取方式: https://console.cloud.tencent.com/asr
@@ -56,7 +65,8 @@ sound:
 
 # 文本输入设置
 input:
-  # 输入方式: clipboard(推荐,GNOME Wayland最可靠) / xdotool / ydotool(仅ASCII) / wtype / type
+  # 输入方式: clipboard(推荐) / xdotool(X11) / wtype(Wayland)
+  # 注意: GNOME Wayland 下只能使用 clipboard 方式
   method: "clipboard"
   # 按键间隔(秒)
   type_delay: 0.005

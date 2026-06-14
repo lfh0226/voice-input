@@ -3,6 +3,7 @@
 import logging
 import os
 import pwd
+import shutil
 import subprocess
 import time
 
@@ -23,12 +24,16 @@ class TextInput:
         """
         self.method = method
         self.type_delay = type_delay
+        self._tool_cache: dict[str, bool] = {}
+        self._focus_window = None  # 目标窗口 ID
+        self._clipboard_process: subprocess.Popen | None = None
 
-    def input_text(self, text: str) -> bool:
+    def input_text(self, text: str, focus_window: str = None) -> bool:
         """Input text at current cursor position.
 
         Args:
             text: Text to input.
+            focus_window: Target window ID for xdotool (optional).
 
         Returns:
             True if successful, False otherwise.
@@ -36,7 +41,11 @@ class TextInput:
         if not text:
             return False
 
-        logger.info(f"准备输入文字: '{text[:20]}{'...' if len(text) > 20 else ''}'")
+        logger.info("准备输入文字，长度: %s", len(text))
+        logger.info(f"配置的输入方法: {self.method}")
+        if focus_window:
+            logger.info(f"目标窗口: {focus_window}")
+            self._focus_window = focus_window
 
         # 根据配置的方法或自动检测选择输入方式
         methods = []
@@ -48,8 +57,16 @@ class TextInput:
             if self._check_wl_copy():
                 methods.append(("wl-clipboard", self._input_via_wl_clipboard))
             methods.append(("clipboard-pynput", self._input_via_clipboard))
-        elif self.method == "xdotool" and self._check_xdotool():
-            methods.append(("xdotool", self._input_via_xdotool))
+        elif self.method == "xdotool":
+            logger.info(f"xdotool 可用: {self._check_xdotool()}")
+            # Wayland 下使用 pynput 剪贴板粘贴（最可靠）
+            if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+                logger.info("检测到 Wayland，使用 pynput 剪贴板粘贴")
+                methods.append(("pynput-clipboard", self._input_via_clipboard))
+            elif self._check_xdotool():
+                methods.append(("xdotool", self._input_via_xdotool))
+            else:
+                logger.warning("xdotool 不可用，回退到自动检测")
         elif self.method == "ydotool" and self._check_ydotool():
             methods.append(("ydotool", self._input_via_ydotool))
         elif self.method == "wtype" and self._check_wtype():
@@ -72,6 +89,7 @@ class TextInput:
             methods.append(("pynput", self._input_via_keyboard))
 
         # 尝试每种方法，直到成功
+        logger.info(f"将尝试 {len(methods)} 种输入方法: {[m[0] for m in methods]}")
         for method_name, method_func in methods:
             logger.debug(f"尝试使用 {method_name} 输入文字...")
             try:
@@ -87,75 +105,105 @@ class TextInput:
     def _user_cmd_prefix(self, wayland: bool = False) -> list[str]:
         """When running as root (via sudo), use runuser to delegate commands to the actual user."""
         if os.geteuid() == 0:
-            sudo_user = os.environ.get('SUDO_USER')
+            sudo_user = os.environ.get("SUDO_USER")
             if sudo_user:
                 pw = pwd.getpwnam(sudo_user)
                 uid = pw.pw_uid
                 home_dir = pw.pw_dir
-                xauthority = os.environ.get('XAUTHORITY', f'{home_dir}/.Xauthority')
+                xauthority = os.environ.get("XAUTHORITY", f"{home_dir}/.Xauthority")
                 env_vars = [
                     f'DISPLAY={os.environ.get("DISPLAY", ":0")}',
-                    f'XAUTHORITY={xauthority}',
+                    f"XAUTHORITY={xauthority}",
+                    f'LANG={os.environ.get("LANG", "C.UTF-8")}',
+                    f'LC_CTYPE={os.environ.get("LC_CTYPE", os.environ.get("LANG", "C.UTF-8"))}',
                 ]
                 if wayland:
                     env_vars += [
                         f'WAYLAND_DISPLAY={os.environ.get("WAYLAND_DISPLAY", "wayland-0")}',
-                        f'XDG_RUNTIME_DIR=/run/user/{uid}',
+                        f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+                        "XDG_SESSION_TYPE=wayland",
                     ]
-                return ['runuser', '-u', sudo_user, '--', 'env'] + env_vars
+                return ["runuser", "-u", sudo_user, "--", "env"] + env_vars
         return []
 
     # --- Check methods ---
 
     def _check_wl_copy(self) -> bool:
         """Check if wl-copy is available (Wayland clipboard)."""
-        try:
-            result = subprocess.run(
-                ["which", "wl-copy"],
-                capture_output=True,
-                text=True,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        return self._tool_available("wl-copy")
 
     def _check_wtype(self) -> bool:
         """Check if wtype is available (Wayland native)."""
-        try:
-            result = subprocess.run(
-                ["which", "wtype"],
-                capture_output=True,
-                text=True,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        return self._tool_available("wtype")
 
     def _check_ydotool(self) -> bool:
         """Check if ydotool is available."""
-        try:
-            result = subprocess.run(
-                ["which", "ydotool"],
-                capture_output=True,
-                text=True,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        return self._tool_available("ydotool")
 
     def _check_xdotool(self) -> bool:
         """Check if xdotool is available."""
-        try:
-            result = subprocess.run(
-                ["which", "xdotool"],
-                capture_output=True,
-                text=True,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        return self._tool_available("xdotool")
+
+    def _tool_available(self, tool: str) -> bool:
+        """缓存工具可用性判断，避免重复 spawn."""
+        if tool not in self._tool_cache:
+            self._tool_cache[tool] = shutil.which(tool) is not None
+        return self._tool_cache[tool]
 
     # --- Input methods ---
+
+    def _stop_clipboard_process(self) -> None:
+        """Stop the previous wl-copy owner process if it is still running."""
+        process = self._clipboard_process
+        self._clipboard_process = None
+        if not process:
+            return
+
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=0.2)
+
+        if process.stderr:
+            process.stderr.close()
+
+    def _start_wl_copy(self, text: str) -> bool:
+        """Start wl-copy without waiting for it to exit.
+
+        wl-copy keeps running as the clipboard owner on Wayland, so waiting for it to
+        exit looks like a timeout. Send text through stdin so recognized text is not
+        exposed in a long-lived process command line.
+        """
+        self._stop_clipboard_process()
+
+        try:
+            self._clipboard_process = subprocess.Popen(
+                self._user_cmd_prefix(wayland=True) + ["wl-copy"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if self._clipboard_process.stdin:
+                self._clipboard_process.stdin.write(text)
+                self._clipboard_process.stdin.close()
+            time.sleep(0.05)
+            if self._clipboard_process.poll() not in (None, 0):
+                stderr = (
+                    self._clipboard_process.stderr.read() if self._clipboard_process.stderr else ""
+                )
+                logger.warning("wl-copy 启动失败: %s", stderr)
+                self._stop_clipboard_process()
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"wl-copy 启动失败: {e}")
+            self._stop_clipboard_process()
+            return False
 
     def _input_via_clipboard_paste(self, text: str) -> bool:
         """Input text using wl-copy + ydotool Ctrl+V.
@@ -166,34 +214,23 @@ class TextInput:
         """
         try:
             logger.debug("使用 wl-copy 复制到剪贴板...")
-            result = subprocess.run(
-                self._user_cmd_prefix(wayland=True) + ["wl-copy", "--", text],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            if result.returncode != 0:
-                logger.warning(f"wl-copy 失败: {result.stderr}")
+            if not self._start_wl_copy(text):
                 return False
-
-            # 等待剪贴板更新
-            time.sleep(0.15)
 
             logger.debug("使用 ydotool 模拟 Ctrl+V...")
             result = subprocess.run(
-                ["ydotool", "key", "ctrl+v"],
+                ["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=1.0,
             )
 
             if result.returncode == 0:
                 return True
             else:
                 logger.warning(f"ydotool Ctrl+V 失败: {result.stderr}")
-                print(f"已复制到剪贴板，请按 Ctrl+V 粘贴")
-                return True
+                print("已复制到剪贴板，请按 Ctrl+V 粘贴")
+                return False
         except subprocess.TimeoutExpired:
             logger.error("剪贴板输入超时")
             return False
@@ -204,20 +241,49 @@ class TextInput:
     def _input_via_xdotool(self, text: str) -> bool:
         """Input text using xdotool (X11/XWayland, supports Unicode/Chinese)."""
         try:
-            logger.debug("使用 xdotool 输入文字...")
-            cmd = self._user_cmd_prefix(wayland=False) + [
-                "xdotool", "type", "--clearmodifiers", "--delay", "12", text,
-            ]
+            logger.info(f"使用 xdotool 输入文字，DISPLAY={os.environ.get('DISPLAY')}")
+
+            # 如果有记住的焦点窗口，使用 --window 参数直接输入
+            if self._focus_window:
+                logger.info(f"直接向窗口 {self._focus_window} 输入")
+                cmd = self._user_cmd_prefix(wayland=False) + [
+                    "xdotool",
+                    "type",
+                    "--window",
+                    self._focus_window,
+                    "--clearmodifiers",
+                    "--delay",
+                    "12",
+                    "--",
+                    text,
+                ]
+            else:
+                # 没有窗口信息，直接输入到当前焦点
+                cmd = self._user_cmd_prefix(wayland=False) + [
+                    "xdotool",
+                    "type",
+                    "--clearmodifiers",
+                    "--delay",
+                    "12",
+                    "--",
+                    text,
+                ]
+
+            logger.info("执行 xdotool 输入命令，参数数量: %s", len(cmd))
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
+            logger.info(f"xdotool 返回码: {result.returncode}")
+            if result.stderr:
+                logger.warning(f"xdotool stderr: {result.stderr}")
+
             if result.returncode == 0:
                 return True
             else:
-                logger.warning(f"xdotool 失败: {result.stderr}")
+                logger.warning(f"xdotool 失败 (返回码 {result.returncode})")
                 return False
         except Exception as e:
             logger.error(f"xdotool 输入失败: {e}")
@@ -227,32 +293,22 @@ class TextInput:
         """Input text using wl-copy + wtype Ctrl+V (Wayland native)."""
         try:
             logger.debug("使用 wl-copy 复制到剪贴板...")
-            result = subprocess.run(
-                self._user_cmd_prefix(wayland=True) + ["wl-copy", "--", text],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            if result.returncode != 0:
-                logger.warning(f"wl-copy 失败: {result.stderr}")
+            if not self._start_wl_copy(text):
                 return False
-
-            time.sleep(0.1)
 
             logger.debug("使用 wtype 模拟 Ctrl+V...")
             result = subprocess.run(
                 self._user_cmd_prefix(wayland=True) + ["wtype", "-M", "ctrl", "v", "-m", "ctrl"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=0.5,
             )
 
             if result.returncode == 0:
                 return True
             else:
                 logger.warning(f"wtype 粘贴失败: {result.stderr}")
-                print(f"已复制到剪贴板，请按 Ctrl+V 粘贴")
+                print("已复制到剪贴板，请按 Ctrl+V 粘贴")
                 return True
         except Exception as e:
             logger.error(f"剪贴板输入失败: {e}")
@@ -299,7 +355,7 @@ class TextInput:
     def _input_via_keyboard(self, text: str) -> bool:
         """Input text by simulating keyboard keystrokes via pynput."""
         try:
-            from pynput.keyboard import Controller, Key
+            from pynput.keyboard import Controller
 
             logger.debug("使用 pynput 模拟键盘输入...")
             keyboard = Controller()
@@ -337,6 +393,35 @@ class TextInput:
             logger.error(f"剪贴板输入失败: {e}")
             return False
 
+    def _input_via_clipboard_notify(self, text: str) -> bool:
+        """Copy to clipboard and notify user (for Wayland)."""
+        try:
+            logger.debug("使用 wl-copy 复制到剪贴板...")
+            result = subprocess.run(
+                ["wl-copy", "--", text],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                print("\n📋 文字已复制到剪贴板，请按 Ctrl+V 粘贴", flush=True)
+                logger.info("✅ 文字已复制到剪贴板")
+                return True
+            else:
+                logger.warning(f"wl-copy 失败: {result.stderr}")
+                # 回退到 pyperclip
+                pyperclip.copy(text)
+                print("\n📋 文字已复制到剪贴板，请按 Ctrl+V 粘贴", flush=True)
+                return True
+        except subprocess.TimeoutExpired:
+            logger.warning("wl-copy 超时，使用 pyperclip")
+            pyperclip.copy(text)
+            print("\n📋 文字已复制到剪贴板，请按 Ctrl+V 粘贴", flush=True)
+            return True
+        except Exception as e:
+            logger.error(f"剪贴板操作失败: {e}")
+            return False
+
     @staticmethod
     def check_dependencies() -> dict[str, bool]:
         """Check if required dependencies are available."""
@@ -344,25 +429,19 @@ class TextInput:
 
         try:
             from pynput.keyboard import Controller  # noqa: F401
+
             deps["pynput"] = True
         except ImportError:
             deps["pynput"] = False
 
         try:
             import pyperclip  # noqa: F401
+
             deps["pyperclip"] = True
         except ImportError:
             deps["pyperclip"] = False
 
         for tool in ["wtype", "ydotool", "xdotool", "wl-copy"]:
-            try:
-                result = subprocess.run(
-                    ["which", tool],
-                    capture_output=True,
-                    text=True,
-                )
-                deps[tool] = result.returncode == 0
-            except Exception:
-                deps[tool] = False
+            deps[tool] = shutil.which(tool) is not None
 
         return deps

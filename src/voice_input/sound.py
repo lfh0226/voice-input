@@ -1,7 +1,6 @@
 """音效反馈模块 - 录音状态提示音"""
 
 import logging
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -54,9 +53,7 @@ class SoundFeedback:
         # 错误提示: 双音 (先高后低)
         self._error_beep = self._generate_error_sound()
 
-    def _generate_beep(
-        self, frequency: int, duration: float, volume: float
-    ) -> np.ndarray:
+    def _generate_beep(self, frequency: int, duration: float, volume: float) -> np.ndarray:
         """生成单音提示音
 
         Args:

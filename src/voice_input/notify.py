@@ -88,8 +88,10 @@ class Notifier:
             if self._method == "notify-send":
                 cmd = [
                     "notify-send",
-                    "-t", str(timeout),
-                    "-a", "Voice Input",
+                    "-t",
+                    str(timeout),
+                    "-a",
+                    "Voice Input",
                     title,
                 ]
                 if message:

@@ -1,5 +1,6 @@
 """Configuration management module."""
 
+import copy
 import os
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,10 @@ class Config:
             "api_secret": "",
             "language": "zh_cn",
             "accent": "mandarin",
+            "max_audio_queue_size": 400,
+            "batch_chunks": 2,
+            "reuse_connection": False,
+            "final_result_timeout": 3.0,
         },
         "tencent": {
             "app_id": "",
@@ -48,7 +53,7 @@ class Config:
             "show_result": False,
         },
         "input": {
-            "method": "type",
+            "method": "clipboard",
             "type_delay": 0.005,
         },
         "logging": {
@@ -73,7 +78,8 @@ class Config:
         # Priority: XDG config home > project dir > home
         locations = [
             Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
-            / "voice-input" / "config.yaml",
+            / "voice-input"
+            / "config.yaml",
             Path.home() / ".voice-input" / "config.yaml",
             Path(__file__).parent.parent.parent / "config.yaml",
         ]
@@ -88,7 +94,7 @@ class Config:
     def _load_config(self) -> None:
         """Load configuration from file."""
         # Start with defaults
-        self._config = self.DEFAULT_CONFIG.copy()
+        self._config = copy.deepcopy(self.DEFAULT_CONFIG)
 
         # Deep merge with file config
         if self._config_path.exists():
@@ -175,17 +181,22 @@ class Config:
     @property
     def logging_config(self) -> dict:
         """Logging configuration."""
-        return self._config.get("logging", {
-            "level": "info",
-            "show_audio_chunks": False,
-            "show_recognized_text": False,
-        })
+        return self._config.get(
+            "logging",
+            {
+                "level": "info",
+                "show_audio_chunks": False,
+                "show_recognized_text": False,
+            },
+        )
 
     def save(self) -> None:
         """Save current configuration to file."""
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._config_path.parent.chmod(0o700)
         with open(self._config_path, "w", encoding="utf-8") as f:
             yaml.dump(self._config, f, default_flow_style=False, allow_unicode=True)
+        self._config_path.chmod(0o600)
 
 
 # Global config instance

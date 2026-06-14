@@ -48,7 +48,9 @@ class AudioRecorder:
         """Check if currently recording."""
         return self._is_recording
 
-    def _audio_callback(self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags) -> None:
+    def _audio_callback(
+        self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags
+    ) -> None:
         """Callback for audio stream."""
         if self._is_recording and not self._stop_event.is_set():
             self._audio_data.append(indata.copy())
@@ -131,7 +133,9 @@ class AudioRecorder:
         import wave
 
         if filepath is None:
-            filepath = Path(tempfile.mktemp(suffix=".wav"))
+            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            temp_file.close()
+            filepath = Path(temp_file.name)
 
         # Convert float32 to int16
         audio_int16 = (audio * 32767).astype(np.int16)
@@ -178,12 +182,14 @@ class AudioRecorder:
         input_devices = []
         for i, dev in enumerate(devices):
             if dev["max_input_channels"] > 0:
-                input_devices.append({
-                    "index": i,
-                    "name": dev["name"],
-                    "channels": dev["max_input_channels"],
-                    "sample_rate": dev["default_samplerate"],
-                })
+                input_devices.append(
+                    {
+                        "index": i,
+                        "name": dev["name"],
+                        "channels": dev["max_input_channels"],
+                        "sample_rate": dev["default_samplerate"],
+                    }
+                )
         return input_devices
 
 
@@ -196,6 +202,7 @@ class StreamingRecorder:
         channels: int = 1,
         chunk_ms: int = 40,
         on_chunk: Optional[Callable[[bytes], None]] = None,
+        retain_audio: bool = False,
     ):
         """初始化流式录音器
 
@@ -209,6 +216,7 @@ class StreamingRecorder:
         self.channels = channels
         self.chunk_ms = chunk_ms
         self.on_chunk = on_chunk
+        self._retain_audio = retain_audio
 
         # 计算每块采样数 (40ms @ 16kHz = 640 samples)
         self.chunk_size = int(sample_rate * chunk_ms / 1000)
@@ -223,13 +231,16 @@ class StreamingRecorder:
         """是否正在录音"""
         return self._is_recording
 
-    def _audio_callback(self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags) -> None:
+    def _audio_callback(
+        self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags
+    ) -> None:
         """音频回调 - 实时输出PCM数据"""
         if not self._is_recording:
             return
 
-        with self._lock:
-            self._audio_buffer.append(indata.copy())
+        if self._retain_audio:
+            with self._lock:
+                self._audio_buffer.append(indata.copy())
 
         # 转换为PCM字节并发送
         if self.on_chunk:
@@ -249,8 +260,9 @@ class StreamingRecorder:
 
         logger.info(f"开始流式录音: {self.sample_rate}Hz, 块大小{self.chunk_ms}ms")
 
-        with self._lock:
-            self._audio_buffer = []
+        if self._retain_audio:
+            with self._lock:
+                self._audio_buffer = []
 
         self._is_recording = True
 
@@ -287,6 +299,9 @@ class StreamingRecorder:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+        if not self._retain_audio:
+            return None
 
         with self._lock:
             if not self._audio_buffer:

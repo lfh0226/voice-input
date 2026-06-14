@@ -1,6 +1,5 @@
 #!/bin/bash
 # Voice Input Launcher
-# This script starts the voice input tool
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -9,50 +8,54 @@ cd "$PROJECT_DIR"
 
 # 解析参数
 BACKGROUND=false
-ARGS=()
-
 for arg in "$@"; do
     case $arg in
-        --background|-b)
-            BACKGROUND=true
-            ;;
-        *)
-            ARGS+=("$arg")
-            ;;
+        --background|-b) BACKGROUND=true ;;
     esac
 done
 
-# 检查 xdotool 依赖
-if ! command -v xdotool &>/dev/null; then
-    echo "安装 xdotool（用于直接文字输入）..."
-    sudo apt install -y xdotool
+# 锁文件路径（与 process_lock.py 保持一致）
+LOCK_FILE="$HOME/.local/share/voice-input/voice-input.lock"
+
+# 单例检查
+if [ -f "$LOCK_FILE" ]; then
+    EXISTING_PID=$(cat "$LOCK_FILE" 2>/dev/null)
+    if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+        echo "❌ 语音输入已在运行 (PID: $EXISTING_PID)"
+        echo "   如需重启，请先运行：kill $EXISTING_PID"
+        exit 1
+    fi
+    rm -f "$LOCK_FILE"
 fi
 
-# Activate virtual environment and run
-source venv/bin/activate
-
-# Check if user is in input group
-if ! groups | grep -q input; then
-    echo "警告: 用户不在 input 组中，可能需要 sudo 权限"
-    echo "请运行: sudo usermod -a -G input \$USER && 重新登录"
-    echo ""
-fi
-
-# 构建运行命令
-if [ -r /dev/input/event0 ]; then
-    CMD="venv/bin/voice-input ${ARGS[*]}"
+# 构建命令
+if [ -x .venv/bin/lb-voice ]; then
+    VOICE_CMD=(".venv/bin/lb-voice")
+elif [ -x venv/bin/lb-voice ]; then
+    VOICE_CMD=("venv/bin/lb-voice")
+elif [ -x venv/bin/voice-input ]; then
+    VOICE_CMD=("venv/bin/voice-input")
 else
-    echo "需要 sudo 权限访问输入设备..."
-    CMD="sudo -E venv/bin/voice-input ${ARGS[*]}"
+    VOICE_CMD=("uv" "run" "lb-voice")
 fi
 
-# 根据参数决定前台或后台运行
+if [ -r /dev/input/event0 ]; then
+    CMD=("${VOICE_CMD[@]}")
+else
+    CMD=("sudo" "-E" "${VOICE_CMD[@]}")
+fi
+
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input"
+mkdir -p "$LOG_DIR"
+chmod 700 "$LOG_DIR"
+LOG_FILE="$LOG_DIR/voice-input.log"
+
+# 后台运行
 if [ "$BACKGROUND" = true ]; then
     echo "启动语音输入（后台模式）..."
-    nohup bash -c "$CMD" > /tmp/voice-input.log 2>&1 &
-    echo $! > /tmp/voice-input.pid
+    nohup "${CMD[@]}" > "$LOG_FILE" 2>&1 &
     echo "语音输入已在后台启动，PID: $!"
-    echo "日志输出: /tmp/voice-input.log"
+    echo "日志输出：$LOG_FILE"
 else
-    exec bash -c "$CMD"
+    exec "${CMD[@]}"
 fi
