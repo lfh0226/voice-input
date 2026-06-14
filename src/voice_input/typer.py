@@ -26,6 +26,7 @@ class TextInput:
         self.type_delay = type_delay
         self._tool_cache: dict[str, bool] = {}
         self._focus_window = None  # 目标窗口 ID
+        self._clipboard_process: subprocess.Popen | None = None
 
     def input_text(self, text: str, focus_window: str = None) -> bool:
         """Input text at current cursor position.
@@ -152,6 +153,58 @@ class TextInput:
 
     # --- Input methods ---
 
+    def _stop_clipboard_process(self) -> None:
+        """Stop the previous wl-copy owner process if it is still running."""
+        process = self._clipboard_process
+        self._clipboard_process = None
+        if not process:
+            return
+
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=0.2)
+
+        if process.stderr:
+            process.stderr.close()
+
+    def _start_wl_copy(self, text: str) -> bool:
+        """Start wl-copy without waiting for it to exit.
+
+        wl-copy keeps running as the clipboard owner on Wayland, so waiting for it to
+        exit looks like a timeout. Send text through stdin so recognized text is not
+        exposed in a long-lived process command line.
+        """
+        self._stop_clipboard_process()
+
+        try:
+            self._clipboard_process = subprocess.Popen(
+                self._user_cmd_prefix(wayland=True) + ["wl-copy"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if self._clipboard_process.stdin:
+                self._clipboard_process.stdin.write(text)
+                self._clipboard_process.stdin.close()
+            time.sleep(0.05)
+            if self._clipboard_process.poll() not in (None, 0):
+                stderr = (
+                    self._clipboard_process.stderr.read() if self._clipboard_process.stderr else ""
+                )
+                logger.warning("wl-copy 启动失败: %s", stderr)
+                self._stop_clipboard_process()
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"wl-copy 启动失败: {e}")
+            self._stop_clipboard_process()
+            return False
+
     def _input_via_clipboard_paste(self, text: str) -> bool:
         """Input text using wl-copy + ydotool Ctrl+V.
 
@@ -161,25 +214,15 @@ class TextInput:
         """
         try:
             logger.debug("使用 wl-copy 复制到剪贴板...")
-            result = subprocess.run(
-                self._user_cmd_prefix(wayland=True) + ["wl-copy", "--", text],
-                capture_output=True,
-                text=True,
-                timeout=0.5,
-            )
-
-            if result.returncode != 0:
-                logger.warning(f"wl-copy 失败: {result.stderr}")
+            if not self._start_wl_copy(text):
                 return False
-
-            time.sleep(0.15)
 
             logger.debug("使用 ydotool 模拟 Ctrl+V...")
             result = subprocess.run(
-                ["ydotool", "key", "ctrl+v"],
+                ["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
                 capture_output=True,
                 text=True,
-                timeout=0.5,
+                timeout=1.0,
             )
 
             if result.returncode == 0:
@@ -187,7 +230,7 @@ class TextInput:
             else:
                 logger.warning(f"ydotool Ctrl+V 失败: {result.stderr}")
                 print("已复制到剪贴板，请按 Ctrl+V 粘贴")
-                return True
+                return False
         except subprocess.TimeoutExpired:
             logger.error("剪贴板输入超时")
             return False
@@ -250,18 +293,8 @@ class TextInput:
         """Input text using wl-copy + wtype Ctrl+V (Wayland native)."""
         try:
             logger.debug("使用 wl-copy 复制到剪贴板...")
-            result = subprocess.run(
-                self._user_cmd_prefix(wayland=True) + ["wl-copy", "--", text],
-                capture_output=True,
-                text=True,
-                timeout=0.5,
-            )
-
-            if result.returncode != 0:
-                logger.warning(f"wl-copy 失败: {result.stderr}")
+            if not self._start_wl_copy(text):
                 return False
-
-            time.sleep(0.15)
 
             logger.debug("使用 wtype 模拟 Ctrl+V...")
             result = subprocess.run(

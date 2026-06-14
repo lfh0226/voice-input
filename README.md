@@ -1,6 +1,6 @@
 # Voice Input
 
-🎤 **流式语音输入工具** - Linux 上的实时语音转文字输入工具，支持讯飞/腾讯/百度语音识别，边说边出文字。
+🎤 **流式语音输入工具** - Linux 上的实时语音转文字输入工具，当前主线使用讯飞 WebSocket/API 流式识别，边说边出文字。
 
 **版本**: v1.0.0
 
@@ -9,31 +9,34 @@
 ```bash
 # 1. 安装系统依赖
 sudo apt update
-sudo apt install -y python3 python3-pip python3-venv portaudio19-dev libevdev2 xdotool wtype xclip wl-clipboard
+sudo apt install -y python3 python3-venv portaudio19-dev libevdev2 wl-clipboard ydotool
 
 # 2. 克隆并安装
-git clone https://github.com/lifuhaolife/lb-voice.git
-cd lb-voice
-./scripts/install.sh
+git clone https://github.com/lifuhaolife/voice-input.git
+cd voice-input
+uv sync
 
 # 3. 配置 API（填入讯飞密钥）
 nano config.yaml
 
-# 4. 重新登录系统后运行
-lb-voice
+# 4. 前台运行
+uv run lb-voice
+
+# 或后台运行
+./scripts/voice-input.sh --background
 ```
 
 ## 功能特性
 
 - 🎙️ **快捷键触发** - 按住快捷键录音，松开自动识别并输入到光标位置
 - 🔄 **流式识别** - 支持讯飞流式语音识别，边说边显示，支持动态修正
-- 🔌 **多后端支持** - 支持讯飞（推荐）、腾讯、百度云语音识别
-- ⚡ **低延迟** - 流式传输，实时返回识别结果
-- ⌨️ **自动输入** - 识别结果自动输入到当前光标位置（支持 X11/Wayland）
+- 🔌 **Web/API 识别** - 当前主线使用讯飞 WebSocket/API；不依赖本地 Whisper 模型
+- ⚡ **低延迟** - 按键立即录音，连接期间缓存音频，松开后快速输出识别结果
+- ⌨️ **自动输入** - GNOME Wayland 默认使用 wl-copy + ydotool Ctrl+V 粘贴
 - 🔒 **单例运行** - 自动防止重复启动
 - 🔔 **通知提示** - 可选的桌面通知反馈
 - 🔧 **后台运行** - 支持后台守护进程模式运行
-- 📝 **调试日志** - 可配置日志级别，便于调试
+- 📝 **调试日志** - 默认不记录完整识别文本，只记录长度和链路诊断信息
 
 ## 系统要求
 
@@ -56,17 +59,14 @@ sudo apt update
 # 安装基础依赖
 sudo apt install -y python3 python3-pip python3-venv portaudio19-dev libevdev2
 
-# 安装输入工具（根据桌面环境选择）
-# X11 用户
+# GNOME Wayland 用户（当前推荐）
+sudo apt install -y wl-clipboard ydotool
+
+# X11 用户可额外安装
 sudo apt install -y xdotool
 
-# Wayland 用户（推荐 wtype）
+# 其他 Wayland 合成器如支持 virtual keyboard，可选安装 wtype
 sudo apt install -y wtype
-# 或者使用 ydotool
-# sudo apt install -y ydotool
-
-# 可选：剪贴板工具（推荐，最稳定的输入方式）
-sudo apt install -y xclip wl-clipboard
 ```
 
 **其他发行版:**
@@ -77,33 +77,21 @@ sudo apt install -y xclip wl-clipboard
 ### 2. 克隆仓库
 
 ```bash
-git clone https://github.com/lifuhaolife/lb-voice.git
-cd lb-voice
+git clone https://github.com/lifuhaolife/voice-input.git
+cd voice-input
 ```
 
-### 3. 运行安装脚本
+### 3. 使用 uv 安装依赖
 
 ```bash
-./scripts/install.sh
+# 推荐：使用 uv 创建 .venv 并同步依赖
+uv sync
+
+# 验证命令入口
+uv run lb-voice --version
 ```
 
-安装脚本会自动：
-- 创建 Python 虚拟环境
-- 安装 Python 依赖
-- 创建系统命令链接到 `/usr/local/bin/lb-voice`
-- 安装桌面启动项
-- 将当前用户添加到 `input` 组（需要重新登录生效）
-
-或手动安装：
-
-```bash
-# 创建虚拟环境
-python3 -m venv venv
-source venv/bin/activate
-
-# 安装依赖
-pip install -e .
-```
+如果需要传统安装方式，也可以运行 `./scripts/install.sh`，但开发和测试默认使用 `uv`。
 
 ### 4. 配置语音识别 API
 
@@ -149,8 +137,8 @@ xunfei:
 ```
 
 配置文件查找顺序：
-1. `~/.config/lb-voice/config.yaml`（推荐）
-2. `~/.lb-voice/config.yaml`
+1. `~/.config/voice-input/config.yaml`（推荐）
+2. `~/.voice-input/config.yaml`
 3. 项目目录下的 `config.yaml`
 
 ## 使用方法
@@ -159,59 +147,60 @@ xunfei:
 
 **重要**: 安装后需要重新登录系统，以使 `input` 组权限生效。
 
-### 启动程序
+### CLI 启动和关闭
 
 ```bash
-# 前台运行（推荐调试时使用）
-lb-voice
+# 前台启动（推荐调试；按 Ctrl+C 关闭）
+uv run lb-voice
 
-# 后台运行
-./scripts/lb-voice.sh --background
+# 后台启动（常用）
+./scripts/voice-input.sh --background
 # 或简写
-./scripts/lb-voice.sh -b
+./scripts/voice-input.sh -b
+
+# 查看后台进程
+ps -eo pid,cmd | grep lb-voice
+
+# 关闭后台进程
+kill <PID>
+
+# 只关闭本项目后台进程
+pkill -f "voice-input/.venv/bin/python3 .venv/bin/lb-voice"
 
 # 查看后台日志
-tail -f ~/.local/share/lb-voice/logs/lb-voice.log
+tail -f ~/.local/state/voice-input/voice-input.log
 ```
+
+后台启动后，按住配置的热键（默认 `alt_r`）说话，松开后自动识别并粘贴到当前光标位置。
 
 ### 快捷键操作
 
-- **按住** `Alt+M`（默认）开始录音
+- **按住** `右 Alt`（默认 `alt_r`）开始录音
 - **松开** 自动停止录音并输入文字
 - 识别结果会自动输入到当前光标位置
-
-### 停止程序
-
-```bash
-# 前台运行：按 Ctrl+C
-
-# 后台运行：查找并终止进程
-ps aux | grep lb-voice
-kill <PID>
-```
 
 ### 命令行选项
 
 ```bash
 # 查看帮助
-lb-voice --help
+uv run lb-voice --help
 
 # 列出音频设备
-lb-voice --list-devices
+uv run lb-voice --list-devices
 
 # 使用自定义配置
-lb-voice --config /path/to/config.yaml
+uv run lb-voice --config /path/to/config.yaml
 
 # 详细日志（调试模式）
-lb-voice -v
+uv run lb-voice -v
 
 # 查看版本
-lb-voice --version
+uv run lb-voice --version
 ```
 
 ## 配置说明
 
-配置文件位于 `~/.config/lb-voice/config.yaml` 或项目目录 `config.yaml`：
+配置文件位于 `~/.config/voice-input/config.yaml`、`~/.voice-input/config.yaml` 或项目目录 `config.yaml`：
 
 ```yaml
 # 语音识别后端
@@ -239,6 +228,8 @@ xunfei:
   vad_eos: 5000       # 语音结束静默时长(毫秒)
   max_audio_queue_size: 400  # 流式识别发送队列最大长度
   batch_chunks: 4     # 每次发送的音频块数量（4-8 可减少 CPU 负载）
+  reuse_connection: false      # 是否复用 WebSocket，默认关闭
+  final_result_timeout: 3.0    # 无中间结果时等待服务端 final 的秒数
 
 # 腾讯语音识别配置
 tencent:
@@ -276,10 +267,10 @@ logging:
 
 ### 输入方式说明
 
-- **clipboard**（推荐）: 通过剪贴板粘贴，最稳定，支持所有桌面环境
-- **xdotool**: X11 环境下模拟按键输入
-- **wtype**: Wayland 环境下模拟按键输入（推荐）
-- **ydotool**: Wayland 环境备选方案（仅支持 ASCII）
+- **clipboard**（推荐）: GNOME Wayland 默认方案，使用 `wl-copy` 写入剪贴板，再用 `ydotool` 触发 Ctrl+V
+- **xdotool**: X11 / XWayland 环境下模拟按键输入
+- **wtype**: 仅适用于支持 virtual keyboard 协议的 Wayland 合成器；GNOME Wayland 通常不支持
+- **ydotool**: uinput 方式，直接输入中文不可靠，主要用于发送 Ctrl+V
 - **type**: 自动检测并选择合适的输入方式
 
 ### 调试模式
@@ -346,15 +337,16 @@ lb-voice --list-devices
 
 ### 文字没有输入到光标位置
 
-1. **Wayland 用户**: 确保安装了输入工具
+1. **GNOME Wayland 用户**: 推荐使用剪贴板方案
    ```bash
-   # 推荐使用 wtype
-   sudo apt install wtype
+   sudo apt install wl-clipboard ydotool
    
    # 配置文件中设置
    input:
-     method: "wtype"
+     method: "clipboard"
    ```
+
+   如果日志出现 `已复制到剪贴板，请按 Ctrl+V 粘贴`，说明识别和复制已完成，但自动 Ctrl+V 未触发，可先手动 Ctrl+V 验证剪贴板内容。
 
 2. **X11 用户**: 确保安装了 xdotool
    ```bash
@@ -365,10 +357,9 @@ lb-voice --list-devices
      method: "xdotool"
    ```
 
-3. **通用方案**: 使用剪贴板方式（最稳定）
-   ```yaml
-   input:
-     method: "clipboard"
+3. **查看日志**
+   ```bash
+   tail -f ~/.local/state/voice-input/voice-input.log
    ```
 
 ### 程序已在运行错误
@@ -381,7 +372,7 @@ ps aux | grep lb-voice
 kill <PID>
 
 # 或删除锁文件
-rm -f ~/.local/share/lb-voice/lb-voice.lock
+rm -f "$XDG_RUNTIME_DIR/voice-input.lock" ~/.local/share/voice-input/voice-input.lock
 ```
 
 ### 语音识别 API 错误
@@ -406,10 +397,26 @@ xunfei:
   batch_chunks: 8  # 增大批量发送数量
 ```
 
+## 开发与测试
+
+```bash
+# 同步依赖
+uv sync
+
+# 运行无外部副作用的安全测试
+uv run pytest -q -m "not live_api and not audio_device and not desktop_input and not manual"
+
+# 代码检查
+uv run ruff check src tests
+uv run black --check src tests
+```
+
+默认测试不会调用真实 API、麦克风、剪贴板或桌面输入。真实 API / 音频 / 桌面输入测试需要人工确认后单独执行。
+
 ## 项目结构
 
 ```
-lb-voice/
+voice-input/
 ├── src/voice_input/
 │   ├── run.py               # 启动入口（处理日志和单例）
 │   ├── main.py              # 主程序逻辑
@@ -424,10 +431,10 @@ lb-voice/
 │   └── recognizer/          # 语音识别后端
 │       ├── base.py          # 基类接口
 │       ├── xunfei.py        # 讯飞流式识别
-│       └── whisper_backend.py  # Whisper 本地识别（实验性）
+│       └── whisper_backend.py  # 历史/实验代码，当前主线不使用本地模型
 ├── scripts/
 │   ├── install.sh           # 安装脚本
-│   ├── lb-voice.sh       # 启动脚本（支持后台运行）
+│   ├── voice-input.sh       # 启动脚本（支持后台运行）
 │   ├── enable-autostart.sh  # 启用开机自启动
 │   ├── disable-autostart.sh # 禁用开机自启动
 │   ├── uninstall.sh         # 卸载脚本
@@ -446,7 +453,7 @@ A: 取决于选择的后端。讯飞支持中文（普通话、粤语）和英�
 A: 讯飞每日 500 次免费调用，个人使用完全足够。
 
 **Q: 可以离线使用吗？**  
-A: 目前主要依赖云端 API。本地 Whisper 支持正在开发中（实验性功能）。
+A: 当前主线依赖 Web/API 语音识别，不使用 Whisper/Torch 等本地模型。
 
 **Q: 支持 macOS 或 Windows 吗？**  
 A: 目前仅支持 Linux。其他平台支持计划中。
@@ -463,6 +470,15 @@ MIT License
 欢迎提交 Issue 和 Pull Request！
 
 ## 更新日志
+
+### 当前分支：低延迟与 uv 测试基线
+
+- ⚡ 热键监听改为事件等待，降低空闲 CPU 占用
+- 🎙️ 按下热键后立即开始录音，连接 WebSocket 期间缓存音频，减少开头丢字
+- 📋 GNOME Wayland 使用 `wl-copy` + `ydotool` 粘贴，避免直接中文输入失败
+- 🔐 默认不记录完整识别文本，日志只记录长度和链路诊断
+- 🧪 新增 pytest 安全测试基线，默认不触发真实 API / 麦克风 / 桌面输入
+- 📦 使用 `uv` 管理 Python 环境和依赖锁定
 
 ### v1.0.0 (2026-03-22)
 
