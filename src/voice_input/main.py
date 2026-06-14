@@ -25,6 +25,8 @@ LOG_LEVELS = {
     "error": logging.ERROR,
 }
 
+LOW_LATENCY_FINAL_TIMEOUT = 0.2
+
 # 默认日志配置（将在应用启动时根据配置更新）
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +70,8 @@ class StreamingVoiceInput:
         self.current_text = ""
         self._is_recording = False
         self._focus_window = None  # 记住焦点窗口用于输入
+        self._reuse_connection = config.xunfei.get("reuse_connection", False)
+        self._final_result_timeout = config.xunfei.get("final_result_timeout", 3.0)
 
         # 快捷键监听器
         self.hotkey_listener: Optional[HotkeyListener] = None
@@ -97,22 +101,40 @@ class StreamingVoiceInput:
                 logger.debug(f"音频块: {len(pcm_bytes)} bytes")
             self.streamer.send_audio(pcm_bytes)
 
+    def _create_streamer(self) -> XunfeiStreamer:
+        """Create a Xunfei streamer from the current configuration."""
+        return XunfeiStreamer(
+            app_id=self.config.xunfei.get("app_id", ""),
+            api_key=self.config.xunfei.get("api_key", ""),
+            api_secret=self.config.xunfei.get("api_secret", ""),
+            language=self.config.xunfei.get("language", "zh_cn"),
+            accent=self.config.xunfei.get("accent", "mandarin"),
+            on_result=self._on_result,
+            vad_eos=self.config.xunfei.get("vad_eos", 5000),
+            max_audio_queue_size=self.config.xunfei.get("max_audio_queue_size", 400),
+            batch_chunks=self.config.xunfei.get("batch_chunks", 2),
+        )
+
+    def _get_streamer(self) -> XunfeiStreamer:
+        """Return the active streamer, creating one when needed."""
+        if self.streamer is None:
+            self.streamer = self._create_streamer()
+        return self.streamer
+
     def _on_result(self, text: str, is_final: bool):
         """识别结果回调 - 边说边显示"""
         self.current_text = text
 
-        # debug模式下打印识别的文本内容
+        # 识别内容可能包含隐私，默认只显示状态和长度
         if self.config.logging_config.get("show_recognized_text"):
             status = "最终结果" if is_final else "中间结果"
-            logger.debug(f"[{status}] 识别文本: '{text}'")
+            logger.debug("[%s] 识别文本长度: %s", status, len(text))
 
-        # 实时显示识别文字（覆盖上一行）
         if text:
-            # \r回到行首，\033[K清除到行尾，\033[32m绿色
-            print(f"\r\033[K\033[32m🎤 {text}\033[0m", end="", flush=True)
+            print(f"\r\033[K\033[32m🎤 已识别 {len(text)} 个字符\033[0m", end="", flush=True)
         if is_final:
             print()  # 换行
-            print(f"\033[33m✅ 已输入: {text}\033[0m", flush=True)
+            print(f"\033[33m✅ 已完成识别，共 {len(text)} 个字符\033[0m", flush=True)
 
     def _on_hotkey_press(self):
         """快捷键按下 - 开始录音"""
@@ -122,10 +144,7 @@ class StreamingVoiceInput:
         # 记住当前焦点窗口（用于后续输入）
         try:
             result = subprocess.run(
-                ["xdotool", "getwindowfocus"],
-                capture_output=True,
-                text=True,
-                timeout=0.5
+                ["xdotool", "getwindowfocus"], capture_output=True, text=True, timeout=0.5
             )
             if result.returncode == 0:
                 self._focus_window = result.stdout.strip()
@@ -140,35 +159,30 @@ class StreamingVoiceInput:
         # 播放开始提示音
         self.sound.play_start()
 
-        # 创建并启动流式识别器
+        # 创建流式识别器
         backend = self.config.backend
-        if backend == "xunfei":
-            self.streamer = XunfeiStreamer(
-                app_id=self.config.xunfei.get("app_id", ""),
-                api_key=self.config.xunfei.get("api_key", ""),
-                api_secret=self.config.xunfei.get("api_secret", ""),
-                language=self.config.xunfei.get("language", "zh_cn"),
-                accent=self.config.xunfei.get("accent", "mandarin"),
-                on_result=self._on_result,
-                vad_eos=self.config.xunfei.get("vad_eos", 5000),
-                max_audio_queue_size=self.config.xunfei.get("max_audio_queue_size", 400),
-                batch_chunks=self.config.xunfei.get("batch_chunks", 2),
-            )
-        else:
+        if backend != "xunfei":
             logger.error(f"不支持的后端: {backend}")
             return
 
-        # 启动识别器
-        if not self.streamer.start():
-            logger.error("启动识别器失败")
+        streamer = self._get_streamer()
+        streamer.prepare_session()
+
+        # 先开始录音，再连接 WebSocket。连接期间的音频会进入 streamer 队列，避免漏掉开头。
+        self._is_recording = True
+        if not self.recorder.start():
+            logger.error("启动录音失败")
+            self._is_recording = False
             self.sound.play_error()
             return
 
-        # 开始录音
-        self._is_recording = True
-        self.recorder.start()
-        self._is_recording = True
-        self.recorder.start()
+        if not streamer.start():
+            logger.error("启动识别器失败")
+            self._is_recording = False
+            self.recorder.stop()
+            self.sound.play_error()
+            if not self._reuse_connection:
+                self.streamer = None
 
     def _on_hotkey_release(self):
         """快捷键释放 - 停止录音并输入文字"""
@@ -185,15 +199,23 @@ class StreamingVoiceInput:
 
         # 获取最终结果
         if self.streamer:
-            final_text = self.streamer.stop()
-            self.streamer = None
+            final_result_timeout = (
+                LOW_LATENCY_FINAL_TIMEOUT if self.current_text else self._final_result_timeout
+            )
+            final_text = self.streamer.stop(
+                close_connection=not self._reuse_connection,
+                final_result_timeout=final_result_timeout,
+            )
+            if not self._reuse_connection:
+                self.streamer = None
 
-            if final_text:
-                logger.info(f"✅ {final_text}")
-                success = self.text_input.input_text(final_text, self._focus_window)
+            text_to_input = final_text or self.current_text
+            if text_to_input:
+                logger.info("识别完成，准备输入 %s 个字符", len(text_to_input))
+                success = self.text_input.input_text(text_to_input, self._focus_window)
                 if not success:
                     logger.error("文字输入失败")
-                    print(f"\033[31m❌ 输入失败: {final_text}\033[0m")
+                    print(f"\033[31m❌ 输入失败，已识别 {len(text_to_input)} 个字符\033[0m")
             else:
                 logger.warning("未识别到文字")
 
@@ -211,11 +233,13 @@ class StreamingVoiceInput:
         # 检查配置
         backend = self.config.backend
         if backend == "xunfei":
-            if not all([
-                self.config.xunfei.get("app_id"),
-                self.config.xunfei.get("api_key"),
-                self.config.xunfei.get("api_secret"),
-            ]):
+            if not all(
+                [
+                    self.config.xunfei.get("app_id"),
+                    self.config.xunfei.get("api_key"),
+                    self.config.xunfei.get("api_secret"),
+                ]
+            ):
                 logger.error("讯飞API配置不完整，请检查config.yaml")
                 return False
         else:
@@ -249,7 +273,7 @@ class StreamingVoiceInput:
 
         # 停止识别器
         if self.streamer:
-            self.streamer.stop()
+            self.streamer.cleanup()
             self.streamer = None
 
         # 停止快捷键监听
@@ -299,7 +323,8 @@ def main():
     )
 
     parser.add_argument(
-        "-c", "--config",
+        "-c",
+        "--config",
         type=Path,
         help="配置文件路径",
     )
@@ -309,7 +334,8 @@ def main():
         help="列出可用的音频输入设备",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="显示详细日志",
     )
@@ -329,10 +355,13 @@ def main():
     if args.list_devices:
         print("可用的音频输入设备:")
         print("-" * 60)
-        devices = StreamingRecorder.list_devices() if hasattr(StreamingRecorder, 'list_devices') else []
+        devices = (
+            StreamingRecorder.list_devices() if hasattr(StreamingRecorder, "list_devices") else []
+        )
         if not devices:
             # 使用AudioRecorder的静态方法
             from voice_input.recorder import AudioRecorder
+
             devices = AudioRecorder.list_devices()
         for dev in devices:
             print(f"  [{dev['index']}] {dev['name']}")

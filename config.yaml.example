@@ -39,6 +39,10 @@ xunfei:
   max_audio_queue_size: 400
   # 批量发送音频块数量，增大可降低 CPU 占用（建议 4-8）
   batch_chunks: 4
+  # 是否复用 WebSocket 连接；默认关闭，真实 API 校准通过后可开启
+  reuse_connection: false
+  # 松开热键后等待服务端最终结果的最长秒数；没有中间结果时建议 2-3 秒保证稳定
+  final_result_timeout: 3.0
 
 # 腾讯语音识别配置 (备选)
 # 获取方式: https://console.cloud.tencent.com/asr

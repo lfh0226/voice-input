@@ -1,17 +1,19 @@
 """Hotkey listener module with Wayland support via evdev."""
 
 import logging
-import os
+import select
 import threading
-import time
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+HOTKEY_POLL_TIMEOUT = 0.1
 
 # Try to import evdev for Wayland/native Linux support
 try:
     import evdev
     from evdev import InputDevice, categorize, ecodes
+
     EVDEV_AVAILABLE = True
 except ImportError:
     EVDEV_AVAILABLE = False
@@ -77,7 +79,7 @@ class HotkeyListener:
     def _parse_hotkey(self) -> None:
         """Parse hotkey string into evdev key codes."""
         parts = self.hotkey_str.lower().split("+")
-        
+
         for part in parts:
             part = part.strip()
             if part in self.KEY_ALIASES:
@@ -133,7 +135,7 @@ class HotkeyListener:
 
         if key_event.keystate == 1:  # Key press
             self._pressed_keys.add(code)
-            
+
             if self._check_hotkey_pressed():
                 if self.mode == "hold":
                     if not self._is_active:
@@ -151,7 +153,7 @@ class HotkeyListener:
 
         elif key_event.keystate == 0:  # Key release
             self._pressed_keys.discard(code)
-            
+
             if self.mode == "hold" and self._is_active:
                 if self._is_hotkey_key(code):
                     self._is_active = False
@@ -162,12 +164,12 @@ class HotkeyListener:
     def _find_keyboard_devices(self) -> list[InputDevice]:
         """Find all keyboard input devices."""
         devices = []
-        
+
         for path in evdev.list_devices():
             try:
                 dev = InputDevice(path)
                 capabilities = dev.capabilities()
-                
+
                 # Check if device has keyboard keys
                 if ecodes.EV_KEY in capabilities:
                     keys = capabilities[ecodes.EV_KEY]
@@ -188,7 +190,7 @@ class HotkeyListener:
             return
 
         self._devices = self._find_keyboard_devices()
-        
+
         if not self._devices:
             logger.error("No keyboard devices found!")
             return
@@ -197,22 +199,19 @@ class HotkeyListener:
 
         while self._running:
             try:
-                # Read events from all devices
-                for dev in self._devices:
+                readable_devices, _, _ = select.select(self._devices, [], [], HOTKEY_POLL_TIMEOUT)
+
+                for dev in readable_devices:
                     try:
                         for event in dev.read():
                             if not self._running:
                                 break
                             self._handle_event(event)
                     except BlockingIOError:
-                        # No events available, continue
                         continue
                     except Exception as e:
                         logger.debug(f"Error reading from {dev.name}: {e}")
-                
-                # 避免 CPU 100% 占用，10ms 延迟对快捷键响应无影响
-                time.sleep(0.01)
-                        
+
             except Exception as e:
                 logger.error(f"Error in event loop: {e}")
                 break
@@ -238,7 +237,7 @@ class HotkeyListener:
 
         logger.info("Stopping hotkey listener")
         self._running = False
-        
+
         # Close devices
         for dev in self._devices:
             try:

@@ -38,13 +38,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
+    "black>=26.5.1",
+    "pytest>=9.1.0",
+    "ruff>=0.15.17",
 ]
 
 [project.scripts]
 lb-voice = "voice_input.run:main"
+voice-input = "voice_input.run:main"
 
 [project.urls]
 Homepage = "https://github.com/lifuhaolife/voice-input"
@@ -54,3 +55,26 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: tests with no external side effects",
+    "integration: mocked integration tests",
+    "live_api: may call real external APIs",
+    "audio_device: may access real audio devices",
+    "desktop_input: may interact with desktop input or clipboard",
+    "manual: requires human interaction",
+    "slow: slow tests",
+]
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "pytest>=9.1.0",
+    "ruff>=0.15.17",
+]

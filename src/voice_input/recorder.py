@@ -48,7 +48,9 @@ class AudioRecorder:
         """Check if currently recording."""
         return self._is_recording
 
-    def _audio_callback(self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags) -> None:
+    def _audio_callback(
+        self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags
+    ) -> None:
         """Callback for audio stream."""
         if self._is_recording and not self._stop_event.is_set():
             self._audio_data.append(indata.copy())
@@ -131,7 +133,9 @@ class AudioRecorder:
         import wave
 
         if filepath is None:
-            filepath = Path(tempfile.mktemp(suffix=".wav"))
+            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            temp_file.close()
+            filepath = Path(temp_file.name)
 
         # Convert float32 to int16
         audio_int16 = (audio * 32767).astype(np.int16)
@@ -178,12 +182,14 @@ class AudioRecorder:
         input_devices = []
         for i, dev in enumerate(devices):
             if dev["max_input_channels"] > 0:
-                input_devices.append({
-                    "index": i,
-                    "name": dev["name"],
-                    "channels": dev["max_input_channels"],
-                    "sample_rate": dev["default_samplerate"],
-                })
+                input_devices.append(
+                    {
+                        "index": i,
+                        "name": dev["name"],
+                        "channels": dev["max_input_channels"],
+                        "sample_rate": dev["default_samplerate"],
+                    }
+                )
         return input_devices
 
 
@@ -225,7 +231,9 @@ class StreamingRecorder:
         """是否正在录音"""
         return self._is_recording
 
-    def _audio_callback(self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags) -> None:
+    def _audio_callback(
+        self, indata: np.ndarray, frames: int, time_info: dict, status: sd.CallbackFlags
+    ) -> None:
         """音频回调 - 实时输出PCM数据"""
         if not self._is_recording:
             return

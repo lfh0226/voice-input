@@ -1,6 +1,5 @@
 """Whisper speech recognition backend."""
 
-import io
 import logging
 from pathlib import Path
 from typing import BinaryIO
@@ -44,6 +43,7 @@ class WhisperRecognizer(Recognizer):
             # Determine device
             if self.device == "auto":
                 import torch
+
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             else:
                 device = self.device
@@ -75,6 +75,7 @@ class WhisperRecognizer(Recognizer):
         elif isinstance(audio_data, bytes):
             # Bytes - write to temp file
             import tempfile
+
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 f.write(audio_data)
                 temp_path = f.name
@@ -85,6 +86,7 @@ class WhisperRecognizer(Recognizer):
             if isinstance(content, str):
                 content = content.encode()
             import tempfile
+
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 f.write(content)
                 temp_path = f.name
@@ -100,7 +102,7 @@ class WhisperRecognizer(Recognizer):
         result = model.transcribe(audio, **kwargs)
         text = result["text"].strip()
 
-        logger.debug(f"Transcribed: {text}")
+        logger.debug("Transcribed text length: %s", len(text))
         return text
 
     def is_available(self) -> bool:
@@ -108,6 +110,7 @@ class WhisperRecognizer(Recognizer):
         if self._available is None:
             try:
                 import whisper  # noqa: F401
+
                 self._available = True
             except ImportError:
                 self._available = False

@@ -14,9 +14,6 @@ for arg in "$@"; do
     esac
 done
 
-# 激活虚拟环境
-source venv/bin/activate
-
 # 锁文件路径（与 process_lock.py 保持一致）
 LOCK_FILE="$HOME/.local/share/voice-input/voice-input.lock"
 
@@ -32,18 +29,33 @@ if [ -f "$LOCK_FILE" ]; then
 fi
 
 # 构建命令
-if [ -r /dev/input/event0 ]; then
-    CMD="venv/bin/voice-input"
+if [ -x .venv/bin/lb-voice ]; then
+    VOICE_CMD=(".venv/bin/lb-voice")
+elif [ -x venv/bin/lb-voice ]; then
+    VOICE_CMD=("venv/bin/lb-voice")
+elif [ -x venv/bin/voice-input ]; then
+    VOICE_CMD=("venv/bin/voice-input")
 else
-    CMD="sudo -E venv/bin/voice-input"
+    VOICE_CMD=("uv" "run" "lb-voice")
 fi
+
+if [ -r /dev/input/event0 ]; then
+    CMD=("${VOICE_CMD[@]}")
+else
+    CMD=("sudo" "-E" "${VOICE_CMD[@]}")
+fi
+
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input"
+mkdir -p "$LOG_DIR"
+chmod 700 "$LOG_DIR"
+LOG_FILE="$LOG_DIR/voice-input.log"
 
 # 后台运行
 if [ "$BACKGROUND" = true ]; then
     echo "启动语音输入（后台模式）..."
-    nohup bash -c "$CMD" > /tmp/voice-input.log 2>&1 &
+    nohup "${CMD[@]}" > "$LOG_FILE" 2>&1 &
     echo "语音输入已在后台启动，PID: $!"
-    echo "日志输出：/tmp/voice-input.log"
+    echo "日志输出：$LOG_FILE"
 else
-    exec bash -c "$CMD"
+    exec "${CMD[@]}"
 fi
