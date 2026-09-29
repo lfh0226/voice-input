@@ -302,6 +302,22 @@ lb-voice -v
 
 ## 故障排除
 
+### 按住快捷键没有反应，日志出现 `Invalid sample rate [PaErrorCode -9997]`
+
+说明程序没有运行在桌面会话环境里（缺少 `XDG_RUNTIME_DIR` 等变量），PortAudio 会退回到
+裸 ALSA 硬件设备（如 `hw:0,0`，只支持 48kHz），导致 16kHz 录音直接失败。
+
+```bash
+# 从桌面终端启动（推荐），脚本会自动补齐会话变量
+./scripts/voice-input.sh --background
+
+# 检查日志中的音频自检结果
+grep "音频输入就绪" ~/.local/state/voice-input/voice-input.log
+```
+
+程序启动时会做音频自检并打印 `音频输入就绪: 设备 N (default) @ 16000Hz`；
+若设备本身不支持 16kHz，程序会自动改用它支持的采样率并重采样到 16kHz。
+
 ### 麦克风无法使用
 
 ```bash
@@ -347,6 +363,14 @@ lb-voice --list-devices
    ```
 
    如果日志出现 `已复制到剪贴板，请按 Ctrl+V 粘贴`，说明识别和复制已完成，但自动 Ctrl+V 未触发，可先手动 Ctrl+V 验证剪贴板内容。
+
+   常见原因是 `ydotoold` 以 root 运行，套接字 `/tmp/.ydotool_socket` 权限为
+   `600 root:root`，普通用户无法连接（手动执行 `ydotool key 0:0` 会报
+   `failed to open uinput device`）。执行一次以下脚本即可修复（需 sudo）：
+
+   ```bash
+   ./scripts/fix-ydotool-socket.sh
+   ```
 
 2. **X11 用户**: 确保安装了 xdotool
    ```bash

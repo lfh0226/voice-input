@@ -246,6 +246,20 @@ class StreamingVoiceInput:
             logger.error(f"不支持的后端: {backend}")
             return False
 
+        # 音频链路自检：提前暴露设备/环境问题（否则要等到第一次按键才报错）
+        audio_ok, audio_message = StreamingRecorder.probe()
+        if audio_ok:
+            logger.info(f"音频输入就绪: {audio_message}")
+        else:
+            logger.error(f"音频输入不可用: {audio_message}")
+            print(
+                "\n\033[31m❌ 音频输入不可用\033[0m\n"
+                f"   {audio_message}\n"
+                "   提示：请在桌面会话（终端或登录自启动）中运行，"
+                "确保 XDG_RUNTIME_DIR / WAYLAND_DISPLAY 等会话变量存在。\n",
+                flush=True,
+            )
+
         # 启动快捷键监听
         self.hotkey_listener = HotkeyListener(
             hotkey=self.config.hotkey.get("trigger", "alt"),

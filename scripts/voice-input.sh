@@ -6,6 +6,41 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
+# 恢复桌面会话环境变量。
+# 如果缺少 XDG_RUNTIME_DIR / PULSE_SERVER 等变量，PortAudio 会退回到裸 ALSA
+# 硬件设备（如 hw:0,0，只支持 48kHz），导致 16kHz 录音直接失败。
+if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+fi
+
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
+        case "$sock" in
+            *.lock) continue ;;
+        esac
+        if [ -S "$sock" ]; then
+            export WAYLAND_DISPLAY="$(basename "$sock")"
+            break
+        fi
+    done
+fi
+
+if [ -z "${DISPLAY:-}" ]; then
+    export DISPLAY=":0"
+fi
+
+# 粘贴环节自检：Wayland 下自动 Ctrl+V 依赖 ydotoold 套接字对当前用户可读写
+if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && command -v ydotool >/dev/null 2>&1; then
+    if [ ! -r /tmp/.ydotool_socket ] || [ ! -w /tmp/.ydotool_socket ]; then
+        echo "⚠️  ydotool 套接字不可读写（$(ls -l /tmp/.ydotool_socket 2>/dev/null || echo '未运行')）"
+        echo "   识别结果将只能停留在剪贴板，无法自动粘贴。修复：sudo ./scripts/fix-ydotool-socket.sh"
+    fi
+fi
+
 # 解析参数
 BACKGROUND=false
 for arg in "$@"; do
