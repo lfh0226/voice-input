@@ -2,6 +2,7 @@
 
 import logging
 import os
+import select
 import threading
 
 import gi
@@ -18,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 # evdev/X11 硬件键码：KEY_RIGHTALT
 ALT_R_KEYCODE = 100
+EVDEV_POLL_TIMEOUT = 0.1
+
+try:
+    import evdev
+
+    EVDEV_AVAILABLE = True
+except ImportError:
+    EVDEV_AVAILABLE = False
 
 
 class VoiceEngine(IBus.Engine):
@@ -39,6 +48,9 @@ class VoiceEngine(IBus.Engine):
         self._stopping = False
         self._stop_requested = False
         self._worker: threading.Thread | None = None
+        self._evdev_thread: threading.Thread | None = None
+        self._evdev_running = False
+        self._evdev_devices = []
 
         log_dir = os.environ.get(
             "XDG_STATE_HOME", os.path.expanduser("~/.local/state")
@@ -71,11 +83,78 @@ class VoiceEngine(IBus.Engine):
 
     def do_enable(self):
         logger.info("voice 输入法引擎已启用（按住 Alt_R 说话，松开上屏）")
+        self._start_evdev_listener()
 
     def do_disable(self):
         logger.info("voice 输入法引擎已停用")
+        self._stop_evdev_listener()
         if self._recording:
             self._request_stop()
+
+    # ------------------------------------------------------------------
+    # evdev 热键监听（GNOME Wayland 下修饰键不会转发给 IM，只能直读 /dev/input）
+    # ------------------------------------------------------------------
+    def _start_evdev_listener(self):
+        if not EVDEV_AVAILABLE or self._evdev_running:
+            return
+        self._evdev_running = True
+        self._evdev_thread = threading.Thread(target=self._evdev_run, daemon=True)
+        self._evdev_thread.start()
+
+    def _stop_evdev_listener(self):
+        self._evdev_running = False
+        for dev in self._evdev_devices:
+            try:
+                dev.close()
+            except Exception:
+                pass
+        self._evdev_devices = []
+        self._evdev_thread = None
+
+    def _evdev_run(self):
+        try:
+            paths = evdev.list_devices()
+            for path in paths:
+                try:
+                    dev = evdev.InputDevice(path)
+                    caps = dev.capabilities()
+                    if evdev.ecodes.EV_KEY in caps and (
+                        evdev.ecodes.KEY_LEFTALT in caps[evdev.ecodes.EV_KEY]
+                        or evdev.ecodes.KEY_RIGHTALT in caps[evdev.ecodes.EV_KEY]
+                    ):
+                        self._evdev_devices.append(dev)
+                except Exception:
+                    continue
+
+            if not self._evdev_devices:
+                logger.warning("evdev 监听:未找到键盘设备")
+                self._evdev_running = False
+                return
+
+            logger.info("evdev 监听 %d 个键盘设备", len(self._evdev_devices))
+            while self._evdev_running:
+                try:
+                    readable, _, _ = select.select(self._evdev_devices, [], [], EVDEV_POLL_TIMEOUT)
+                except (OSError, ValueError):
+                    break
+                for dev in readable:
+                    try:
+                        for event in dev.read():
+                            if not self._evdev_running:
+                                break
+                            if event.type != evdev.ecodes.EV_KEY:
+                                continue
+                            if event.code == evdev.ecodes.KEY_RIGHTALT:
+                                if event.value == 1:
+                                    logger.info("evdev: Alt_R 按下")
+                                    self._request_start()
+                                elif event.value == 0:
+                                    logger.info("evdev: Alt_R 松开")
+                                    self._request_stop()
+                    except Exception:
+                        continue
+        except Exception:
+            logger.exception("evdev 监听线程异常")
 
     # ------------------------------------------------------------------
     # 录音会话（后台线程，避免阻塞 IBus 主循环）
