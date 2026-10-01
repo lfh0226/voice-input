@@ -154,14 +154,10 @@ class StreamingVoiceInput:
         # 切换到 voice 输入法(为 commit 做准备),记住原 IM 以便恢复
         if self._fcitx5_remote:
             try:
-                res = subprocess.run(
-                    [self._fcitx5_remote, "-n"], capture_output=True, text=True, timeout=1
-                )
-                self._prev_im = res.stdout.strip() or self._prev_im
                 subprocess.run(
                     [self._fcitx5_remote, "-s", "voice"], capture_output=True, timeout=1
                 )
-                logger.debug(f"切换到 voice IM (原: {self._prev_im})")
+                logger.debug("切换到 voice IM")
             except Exception as e:
                 logger.debug(f"切换 IM 失败: {e}")
 
@@ -189,24 +185,31 @@ class StreamingVoiceInput:
             logger.error(f"不支持的后端: {backend}")
             return
 
-        streamer = self._get_streamer()
-        streamer.prepare_session()
-
         # 先开始录音，再连接 WebSocket。连接期间的音频会进入 streamer 队列，避免漏掉开头。
-        self._is_recording = True
-        if not self.recorder.start():
-            logger.error("启动录音失败")
-            self._is_recording = False
-            self.sound.play_error()
-            return
-
-        if not streamer.start():
-            logger.error("启动识别器失败")
+        # 连接失败(网络抖动)自动重试一次
+        started = False
+        for attempt in range(2):
+            streamer = self._get_streamer()
+            streamer.prepare_session()
+            self._is_recording = True
+            if not self.recorder.start():
+                logger.error("启动录音失败")
+                self._is_recording = False
+                self.sound.play_error()
+                return
+            if streamer.start():
+                started = True
+                break
+            logger.warning(f"启动识别器失败(第 {attempt + 1} 次)")
             self._is_recording = False
             self.recorder.stop()
-            self.sound.play_error()
             if not self._reuse_connection:
                 self.streamer = None
+            if attempt == 0:
+                time.sleep(0.5)
+        if not started:
+            logger.error("启动识别器失败(已重试)")
+            self.sound.play_error()
 
     def _on_hotkey_release(self):
         """快捷键释放 - 停止录音并输入文字"""
@@ -249,21 +252,6 @@ class StreamingVoiceInput:
             else:
                 logger.warning("未识别到文字")
 
-            # 恢复原输入法(延迟片刻确保 commit 已送达)
-            if self._fcitx5_remote and self._prev_im:
-                target_im = self._prev_im
-
-                def _restore():
-                    try:
-                        subprocess.run(
-                            [self._fcitx5_remote, "-s", target_im],
-                            capture_output=True,
-                            timeout=1,
-                        )
-                    except Exception:
-                        pass
-
-                threading.Timer(0.4, _restore).start()
 
     def start(self) -> bool:
         """启动语音输入
