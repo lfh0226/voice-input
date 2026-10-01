@@ -16,7 +16,7 @@ from voice_input.config import Config, get_config
 from voice_input.hotkey import HotkeyListener
 from voice_input.ipc.client import VoiceIMClient
 from voice_input.recorder import StreamingRecorder
-from voice_input.recognizer.xunfei import XunfeiStreamer
+from voice_input.backends import get_streamer
 from voice_input.sound import SoundFeedback
 from voice_input.typer import TextInput
 
@@ -108,19 +108,9 @@ class StreamingVoiceInput:
                 logger.debug(f"音频块: {len(pcm_bytes)} bytes")
             self.streamer.send_audio(pcm_bytes)
 
-    def _create_streamer(self) -> XunfeiStreamer:
-        """Create a Xunfei streamer from the current configuration."""
-        return XunfeiStreamer(
-            app_id=self.config.xunfei.get("app_id", ""),
-            api_key=self.config.xunfei.get("api_key", ""),
-            api_secret=self.config.xunfei.get("api_secret", ""),
-            language=self.config.xunfei.get("language", "zh_cn"),
-            accent=self.config.xunfei.get("accent", "mandarin"),
-            on_result=self._on_result,
-            vad_eos=self.config.xunfei.get("vad_eos", 5000),
-            max_audio_queue_size=self.config.xunfei.get("max_audio_queue_size", 400),
-            batch_chunks=self.config.xunfei.get("batch_chunks", 2),
-        )
+    def _create_streamer(self):
+        """通过后端抽象层创建流式会话(V2:可插拔 ASR 后端)。"""
+        return get_streamer(self.config, self._on_result)
 
     def _get_streamer(self) -> XunfeiStreamer:
         """Return the active streamer, creating one when needed."""
