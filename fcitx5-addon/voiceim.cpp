@@ -67,7 +67,20 @@ public:
             close(clientFd_);
     }
 
-    void activate(const InputMethodEntry &, InputContextEvent &) override {}
+    void activate(const InputMethodEntry &, InputContextEvent &) override {
+        // 引擎激活时若还有暂存未上屏的最终结果,立即补 commit
+        if (!pendingFinal_.empty()) {
+            auto *ic = focusedIC();
+            if (ic) {
+                std::string t = pendingFinal_;
+                pendingFinal_.clear();
+                retrySource_.reset();
+                ic->commitString(t);
+                sendAck(true);
+                debugLog("activate 补 commit,len=" + std::to_string(t.size()));
+            }
+        }
+    }
     void deactivate(const InputMethodEntry &, InputContextEvent &) override {
         clearPreedit();
     }
@@ -203,10 +216,17 @@ private:
                 ic->commitString(text);
                 committed = true;
             }
-            // 必须 ack,否则 daemon 等待超时后会走剪贴板回退造成重复输入
-            std::string ack = committed ? "{\"type\":\"ack\",\"committed\":true}\n"
-                                        : "{\"type\":\"ack\",\"committed\":false}\n";
-            send(clientFd_, ack.c_str(), ack.size(), 0);
+            if (committed) {
+                sendAck(true);
+            } else if (!text.empty()) {
+                // 焦点 IC 尚未就绪(切 IM 竞态):暂存并重试,焦点就绪后自动补上屏
+                debugLog("final 暂存,等待焦点就绪(最长 3s)");
+                pendingFinal_ = text;
+                pendingRetries_ = 30;
+                armRetry();
+            } else {
+                sendAck(false);
+            }
         } else if (line.find("\"type\":\"ping\"") != std::string::npos) {
             const char *pong = "{\"type\":\"pong\"}\n";
             send(clientFd_, pong, strlen(pong), 0);
@@ -214,6 +234,53 @@ private:
     }
 
     std::string recvBuffer_;
+    std::string pendingFinal_;
+    int pendingRetries_ = 0;
+    std::unique_ptr<EventSourceTime> retrySource_;
+
+    static uint64_t nowUs() {
+        timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return uint64_t(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
+    }
+
+    void sendAck(bool committed) {
+        if (clientFd_ < 0)
+            return;
+        std::string ack = committed ? "{\"type\":\"ack\",\"committed\":true}\n"
+                                    : "{\"type\":\"ack\",\"committed\":false}\n";
+        send(clientFd_, ack.c_str(), ack.size(), 0);
+    }
+
+    void armRetry() {
+        retrySource_ = instance_->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, nowUs() + 100000, 10000,
+            [this](EventSourceTime *, uint64_t) -> bool { return retryCommit(); });
+    }
+
+    bool retryCommit() {
+        if (pendingFinal_.empty())
+            return false; // 已处理,移除定时器
+        auto *ic = focusedIC();
+        if (!ic) {
+            if (--pendingRetries_ > 0) {
+                retrySource_->setTime(nowUs() + 100000);
+                return true;
+            }
+            debugLog("重试超时,放弃 commit");
+            sendAck(false);
+            pendingFinal_.clear();
+            retrySource_.reset();
+            return false;
+        }
+        debugLog("焦点就绪,补 commit,len=" + std::to_string(pendingFinal_.size()));
+        clearPreedit();
+        ic->commitString(pendingFinal_);
+        sendAck(true);
+        pendingFinal_.clear();
+        retrySource_.reset();
+        return false;
+    }
 
     Instance *instance_;
     int listenFd_ = -1;
