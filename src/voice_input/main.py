@@ -60,6 +60,8 @@ class StreamingVoiceInput:
             type_delay=config.input_config.get("type_delay", 0.005),
         )
         self.im_client = VoiceIMClient()
+        self._committed_len = 0   # 本次会话已通过插件上屏的字符数
+        self._last_commit_ts = 0.0
         self._fcitx5_remote = shutil.which("fcitx5-remote")
 
         # 流式录音器
@@ -130,9 +132,21 @@ class StreamingVoiceInput:
         """识别结果回调 - 边说边显示"""
         self.current_text = text
 
-        # 流式中间结果 → fcitx5 预编辑区(插件在 voice IM 激活时显示)
+        # 流式中间结果 → fcitx5 预编辑区(只发未上屏的增量部分)
         if self._is_recording and not is_final and text:
-            self.im_client.send_partial(text)
+            remainder = text[self._committed_len :]
+            if remainder:
+                self.im_client.send_partial(remainder)
+            # 长语音分段自动上屏:每累计 ≥10 个新字且距上次提交 ≥2 秒
+            if (
+                len(text) - self._committed_len >= 10
+                and time.time() - self._last_commit_ts >= 2.0
+            ):
+                segment = text[self._committed_len :]
+                if self.im_client.send_final(segment):
+                    logger.info("分段上屏 %d 字(累计 %d)", len(segment), self._committed_len + len(segment))
+                    self._committed_len = len(text)
+                    self._last_commit_ts = time.time()
 
         # 识别内容可能包含隐私，默认只显示状态和长度
         if self.config.logging_config.get("show_recognized_text"):
@@ -183,6 +197,8 @@ class StreamingVoiceInput:
 
         print("\n🔴 开始录音，请说话...", flush=True)
         self.current_text = ""
+        self._committed_len = 0
+        self._last_commit_ts = 0.0
 
         # 播放开始提示音
         self.sound.play_start()
@@ -244,7 +260,7 @@ class StreamingVoiceInput:
             if not self._reuse_connection:
                 self.streamer = None
 
-            text_to_input = final_text or self.current_text
+            text_to_input = (final_text or self.current_text)[self._committed_len :]
             if text_to_input:
                 # 优先走 fcitx5 插件直接 commit(零粘贴);失败回退剪贴板粘贴
                 delivered = self.im_client.send_final(text_to_input)
