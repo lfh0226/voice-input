@@ -112,7 +112,7 @@ class StreamingVoiceInput:
         """通过后端抽象层创建流式会话(V2:可插拔 ASR 后端)。"""
         return get_streamer(self.config, self._on_result)
 
-    def _get_streamer(self) -> XunfeiStreamer:
+    def _get_streamer(self):
         """Return the active streamer, creating one when needed."""
         if self.streamer is None:
             self.streamer = self._create_streamer()
