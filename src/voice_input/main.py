@@ -157,6 +157,15 @@ class StreamingVoiceInput:
                     [self._fcitx5_remote, "-s", "voice"], capture_output=True, timeout=1
                 )
                 logger.debug("切换到 voice IM")
+                # 切 IM 会让应用侧输入上下文 focusOut;注入一次无害的 Shift
+                # 敲击强制输入上下文重新挂到 voice 引擎上,否则 final 时
+                # focusedIC 为 null,commit 会静默丢失
+                if shutil.which("ydotool"):
+                    subprocess.run(
+                        ["ydotool", "key", "42:1", "42:0"],
+                        capture_output=True,
+                        timeout=1,
+                    )
             except Exception as e:
                 logger.debug(f"切换 IM 失败: {e}")
 
