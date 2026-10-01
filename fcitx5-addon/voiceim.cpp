@@ -136,9 +136,19 @@ private:
             return;
         }
         buf[n] = '\0';
-        std::string line(buf);
-        std::string text = extractText(line);
+        // TCP 流式粘包处理:按 \n 拆分,残余半行留到下一次
+        recvBuffer_.append(buf, n);
+        size_t pos;
+        while ((pos = recvBuffer_.find('\n')) != std::string::npos) {
+            std::string line = recvBuffer_.substr(0, pos);
+            recvBuffer_.erase(0, pos + 1);
+            if (!line.empty())
+                processLine(line);
+        }
+    }
 
+    void processLine(const std::string &line) {
+        std::string text = extractText(line);
         if (line.find("\"type\":\"partial\"") != std::string::npos) {
             auto *ic = focusedIC();
             if (!ic || text.empty())
@@ -165,6 +175,8 @@ private:
             send(clientFd_, pong, strlen(pong), 0);
         }
     }
+
+    std::string recvBuffer_;
 
     Instance *instance_;
     int listenFd_ = -1;
