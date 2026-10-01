@@ -238,6 +238,16 @@ recording:
   chunk_ms: 80        # 每块音频时长(毫秒)，80-160ms 可降低 CPU 占用
   max_duration: 30    # 最长录音时长(秒)
 
+# 常驻监听（V2.1，实验性，默认关闭）
+resident:
+  enabled: false          # 开启后麦克风持续采集；必须显式同意隐私取舍
+  speech_rms_threshold: 500.0
+  start_frames: 2         # 连续 2 帧(80ms/帧)确认说话，减少误触发
+  end_silence_ms: 700     # 静音 hangover，避免词语间停顿切段
+  min_speech_ms: 240      # 过短声音不提交 ASR
+  prebuffer_ms: 240       # 回放确认前的音频，避免丢首字
+  max_segment_ms: 60000   # 超长语音强制分段
+
 # 讯飞语音识别配置
 xunfei:
   app_id: ""

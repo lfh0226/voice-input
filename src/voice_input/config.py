@@ -23,6 +23,18 @@ class Config:
             "chunk_ms": 40,
             "max_duration": 30,
         },
+        # Resident listening continuously reads the microphone. It is an
+        # explicit opt-in feature because users must understand the privacy
+        # trade-off before enabling it.
+        "resident": {
+            "enabled": False,
+            "speech_rms_threshold": 500.0,
+            "start_frames": 2,
+            "end_silence_ms": 700,
+            "min_speech_ms": 240,
+            "prebuffer_ms": 240,
+            "max_segment_ms": 60_000,
+        },
         "xunfei": {
             "app_id": "",
             "api_key": "",
@@ -147,6 +159,11 @@ class Config:
     def recording(self) -> dict:
         """Recording configuration."""
         return self._config["recording"]
+
+    @property
+    def resident(self) -> dict:
+        """Resident listening configuration."""
+        return self._config["resident"]
 
     @property
     def xunfei(self) -> dict:

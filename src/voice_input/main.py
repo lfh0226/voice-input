@@ -14,7 +14,9 @@ from typing import Any, Optional
 from voice_input.config import Config, get_config
 from voice_input.hotkey import HotkeyListener
 from voice_input.ipc.client import VoiceIMClient
+from voice_input.resident import ASRSessionRelay
 from voice_input.recorder import StreamingRecorder
+from voice_input.vad import EnergyVAD, VADConfig
 from voice_input.backends import get_streamer
 from voice_input.backends.base import StreamingSession
 from voice_input.sound import SoundFeedback
@@ -83,6 +85,45 @@ class StreamingVoiceInput:
         # 快捷键监听器
         self.hotkey_listener: Optional[HotkeyListener] = None
 
+        # V2.1 resident listening. This replaces hotkey-driven capture with a
+        # continuously read microphone, local VAD segmentation and ASR session
+        # relay. It stays disabled until explicitly configured.
+        self._resident_enabled = bool(config.resident.get("enabled", False))
+        self.resident_vad: EnergyVAD | None = None
+        self.resident_relay: ASRSessionRelay | None = None
+        self._resident_committed_len = 0
+        if self._resident_enabled:
+            resident_config = config.resident
+            vad_config = VADConfig(
+                sample_rate=config.recording.get("sample_rate", 16000),
+                frame_ms=config.recording.get("chunk_ms", 80),
+                speech_rms_threshold=resident_config.get(
+                    "speech_rms_threshold", 500.0
+                ),
+                start_frames=resident_config.get("start_frames", 2),
+                end_silence_ms=resident_config.get("end_silence_ms", 700),
+                min_speech_ms=resident_config.get("min_speech_ms", 240),
+                prebuffer_ms=resident_config.get("prebuffer_ms", 240),
+                max_segment_ms=resident_config.get("max_segment_ms", 60_000),
+            )
+            self.resident_vad = EnergyVAD(
+                vad_config,
+                on_segment_start=self._on_resident_segment_start,
+                on_speech=self._on_resident_speech,
+                on_segment_end=self._on_resident_segment_end,
+            )
+            self.resident_relay = ASRSessionRelay(
+                create_session=lambda: self._create_streamer(
+                    self._on_resident_result
+                ),
+                on_result=lambda text, final: None,
+                on_final=self._on_resident_final,
+                final_result_timeout=config.xunfei.get(
+                    "final_result_timeout", 3.0
+                ),
+                reuse_connection=True,
+            )
+
         # 运行状态
         self._running = False
 
@@ -102,15 +143,19 @@ class StreamingVoiceInput:
 
     def _on_audio_chunk(self, pcm_bytes: bytes):
         """音频块回调 - 发送到流式识别器"""
+        if self.resident_vad:
+            self.resident_vad.feed(pcm_bytes)
+            return
+
         if self.streamer and self._is_recording:
             # debug模式下打印音频块信息
             if self.config.logging_config.get("show_audio_chunks"):
                 logger.debug(f"音频块: {len(pcm_bytes)} bytes")
             self.streamer.send_audio(pcm_bytes)
 
-    def _create_streamer(self):
+    def _create_streamer(self, on_result=None):
         """通过后端抽象层创建流式会话(V2:可插拔 ASR 后端)。"""
-        return get_streamer(self.config, self._on_result)
+        return get_streamer(self.config, on_result or self._on_result)
 
     def _get_streamer(self):
         """Return the active streamer, creating one when needed."""
@@ -228,6 +273,60 @@ class StreamingVoiceInput:
             logger.error("启动识别器失败(已重试)")
             self.sound.play_error()
 
+    def _on_resident_segment_start(self, pcm_bytes: bytes) -> None:
+        """Feed speech prebuffer into the already-warm ASR session."""
+        self._resident_committed_len = 0
+        if self.resident_relay and pcm_bytes:
+            self.resident_relay.send_audio(pcm_bytes)
+
+    def _on_resident_speech(self, pcm_bytes: bytes) -> None:
+        """Stream one voiced VAD frame to the active ASR session."""
+        if self.resident_relay:
+            self.resident_relay.send_audio(pcm_bytes)
+
+    def _on_resident_segment_end(self) -> None:
+        """Finalize the current segment while warming the next session."""
+        if self.resident_relay:
+            self.resident_relay.finish_segment()
+
+    def _on_resident_result(self, text: str, is_final: bool) -> None:
+        """Render resident ASR partials and retain incremental commit state."""
+        self.current_text = text
+        if is_final or not text:
+            return
+
+        remainder = text[self._resident_committed_len :]
+        if remainder:
+            self.im_client.send_partial(remainder)
+
+        # Reuse the long-speech policy from hotkey mode: commit a stable
+        # prefix so a very long utterance is not held in preedit forever.
+        if (
+            len(text) - self._resident_committed_len >= 10
+            and time.time() - self._last_commit_ts >= 2.0
+        ):
+            segment = text[self._resident_committed_len :]
+            if self.im_client.send_final(segment):
+                self._resident_committed_len = len(text)
+                self._last_commit_ts = time.time()
+
+    def _on_resident_final(self, text: str) -> None:
+        """Commit the final remainder produced by a relayed session."""
+        remainder = text[self._resident_committed_len :]
+        self._resident_committed_len = max(0, len(text))
+        if not remainder:
+            return
+
+        delivered = self.im_client.send_final(remainder)
+        if delivered:
+            logger.info("常驻会话已上屏 %d 个字符", len(remainder))
+            return
+
+        # Resident mode intentionally has no remembered focus window from a
+        # hotkey press. Clipboard fallback would be unsafe outside an explicit
+        # user gesture, so surface the failure instead of typing blindly.
+        logger.error("常驻会话插件上屏失败,已丢弃 %d 个字符", len(remainder))
+
     def _on_hotkey_release(self):
         """快捷键释放 - 停止录音并输入文字"""
         if not self._is_recording:
@@ -279,6 +378,11 @@ class StreamingVoiceInput:
         if self._running:
             return True
 
+        if self._resident_enabled:
+            logger.warning(
+                "常驻监听已启用:麦克风将持续采集音频。识别文本仅发送到配置的 ASR 后端; "
+                "如需停止,请禁用 resident.enabled 并重启服务。"
+            )
         logger.info("启动流式语音输入...")
 
         # 创建 fcitx5 插件套接字目录
@@ -320,6 +424,18 @@ class StreamingVoiceInput:
                 flush=True,
             )
 
+        if self._resident_enabled:
+            # Resident mode owns the microphone continuously. Keeping the
+            # hotkey listener active would race on recorder.start/stop.
+            if not self.recorder.start():
+                logger.error("常驻监听启动录音失败")
+                self.resident_relay.stop()
+                return False
+            self.resident_relay.warm()
+            self._running = True
+            logger.info("常驻监听已就绪,等待本地 VAD 触发识别")
+            return True
+
         # 启动快捷键监听
         self.hotkey_listener = HotkeyListener(
             hotkey=self.config.hotkey.get("trigger", "alt"),
@@ -343,6 +459,15 @@ class StreamingVoiceInput:
         # 停止录音
         if self._is_recording:
             self._is_recording = False
+            self.recorder.stop()
+
+        if self.resident_vad:
+            self.resident_vad.flush()
+            self.resident_vad = None
+        if self.resident_relay:
+            self.resident_relay.stop()
+            self.resident_relay = None
+        if self._resident_enabled:
             self.recorder.stop()
 
         # 停止识别器
