@@ -1,0 +1,29 @@
+name: CI
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      # 音频依赖用例(recorder/streaming)需要真实麦克风,仅在本地运行
+      - run: uv run pytest -q -k "not recorder and not streaming"
+
+  cpp-addon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 fcitx5 开发库
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfcitx5core-dev cmake g++
+      - name: 构建 voiceim 插件
+        run: |
+          cmake -S fcitx5-addon -B fcitx5-addon/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build fcitx5-addon/build -j"$(nproc)"
+

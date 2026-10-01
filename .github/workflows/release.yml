@@ -1,0 +1,33 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 fcitx5 开发库
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfcitx5core-dev cmake g++
+      - name: 构建插件
+        run: |
+          cmake -S fcitx5-addon -B fcitx5-addon/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build fcitx5-addon/build -j"$(nproc)"
+      - name: 打包
+        run: |
+          mkdir -p dist/fcitx5-voiceim
+          cp fcitx5-addon/build/libvoiceim.so dist/fcitx5-voiceim/
+          cp fcitx5-addon/voiceim.conf dist/fcitx5-voiceim/
+          cp fcitx5-addon/voice.conf dist/fcitx5-voiceim/
+          cp scripts/install-fcitx5-addon.sh dist/fcitx5-voiceim/
+          tar czf fcitx5-voiceim-${{ github.ref_name }}.tar.gz -C dist fcitx5-voiceim
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fcitx5-voiceim-*.tar.gz
+          generate_release_notes: true
