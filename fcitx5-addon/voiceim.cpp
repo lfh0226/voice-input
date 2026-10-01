@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -84,10 +85,16 @@ private:
     }
 
     void startListen() {
+        // 确保套接字父目录存在(如 /run/user/1000/voice-input)
+        std::string path = socketPath();
+        auto slash = path.rfind('/');
+        if (slash != std::string::npos) {
+            std::string dir = path.substr(0, slash);
+            mkdir(dir.c_str(), 0755); // 已存在时忽略 EEXIST
+        }
         listenFd_ = socket(AF_UNIX, SOCK_STREAM, 0);
         if (listenFd_ < 0)
             return;
-        std::string path = socketPath();
         unlink(path.c_str());
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;

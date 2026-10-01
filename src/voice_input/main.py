@@ -264,6 +264,15 @@ class StreamingVoiceInput:
 
         logger.info("启动流式语音输入...")
 
+        # 创建 fcitx5 插件套接字目录
+        try:
+            import os as _os
+
+            _runtime = _os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{_os.getuid()}")
+            _os.makedirs(_os.path.join(_runtime, "voice-input"), exist_ok=True)
+        except Exception as e:
+            logger.warning(f"创建 IPC 目录失败: {e}")
+
         # 检查配置
         backend = self.config.backend
         if backend == "xunfei":
