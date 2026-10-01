@@ -85,6 +85,12 @@ class VoiceEngine(IBus.Engine):
         logger.info("voice 输入法引擎已启用（按住 Alt_R 说话，松开上屏）")
         self._start_evdev_listener()
 
+    def do_focus_in(self):
+        logger.info("焦点进入（commit/preedit 将作用于当前输入框）")
+
+    def do_focus_out(self):
+        logger.info("焦点离开")
+
     def do_disable(self):
         logger.info("voice 输入法引擎已停用")
         self._stop_evdev_listener()

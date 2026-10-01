@@ -134,6 +134,8 @@ class StreamingVoiceInput:
 
         # 流式中间结果 → fcitx5 预编辑区(只发未上屏的增量部分)
         if self._is_recording and not is_final and text:
+            elapsed = time.time() - self._session_t0
+            logger.info("T+%.2fs 中间结果 len=%d", elapsed, len(text))
             remainder = text[self._committed_len :]
             if remainder:
                 self.im_client.send_partial(remainder)
@@ -197,6 +199,7 @@ class StreamingVoiceInput:
 
         print("\n🔴 开始录音，请说话...", flush=True)
         self.current_text = ""
+        self._session_t0 = time.time()
         self._committed_len = 0
         self._last_commit_ts = 0.0
 
