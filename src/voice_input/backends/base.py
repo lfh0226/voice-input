@@ -1,7 +1,7 @@
 """ASR 后端抽象:定义 daemon 所需的流式会话接口."""
 
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable
 
 
 class StreamingSession(ABC):
