@@ -7,7 +7,6 @@ import logging
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -17,6 +16,7 @@ from voice_input.hotkey import HotkeyListener
 from voice_input.ipc.client import VoiceIMClient
 from voice_input.recorder import StreamingRecorder
 from voice_input.backends import get_streamer
+from voice_input.backends.base import StreamingSession
 from voice_input.sound import SoundFeedback
 from voice_input.typer import TextInput
 
@@ -73,7 +73,7 @@ class StreamingVoiceInput:
         )
 
         # 流式识别器
-        self.streamer: Optional[XunfeiStreamer] = None
+        self.streamer: Optional[StreamingSession] = None
         self.current_text = ""
         self._is_recording = False
         self._focus_window = None  # 记住焦点窗口用于输入
