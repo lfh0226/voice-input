@@ -12,7 +12,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
       # 音频依赖用例(recorder/streaming)需要真实麦克风,仅在本地运行
-      - run: uv run pytest -q -k "not recorder and not streaming"
+      # 音频依赖用例需真实麦克风,CI 中跳过(导入即触发 PortAudio 初始化)
+      - run: uv run pytest -q --ignore=tests/test_streaming_voice_input.py --ignore=tests/test_recorder.py --ignore=tests/test_hotkey_listener.py --ignore=tests/test_text_input.py
 
   cpp-addon:
     runs-on: ubuntu-latest
