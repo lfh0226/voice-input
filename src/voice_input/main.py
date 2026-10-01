@@ -2,16 +2,19 @@
 """Voice Input - 流式语音输入工具"""
 
 import argparse
+import shutil
 import logging
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 from voice_input.config import Config, get_config
 from voice_input.hotkey import HotkeyListener
+from voice_input.ipc.client import VoiceIMClient
 from voice_input.recorder import StreamingRecorder
 from voice_input.recognizer.xunfei import XunfeiStreamer
 from voice_input.sound import SoundFeedback
@@ -56,6 +59,10 @@ class StreamingVoiceInput:
             method=config.input_config.get("method", "type"),
             type_delay=config.input_config.get("type_delay", 0.005),
         )
+        self.im_client = VoiceIMClient()
+        self._committed_len = 0   # 本次会话已通过插件上屏的字符数
+        self._last_commit_ts = 0.0
+        self._fcitx5_remote = shutil.which("fcitx5-remote")
 
         # 流式录音器
         self.recorder = StreamingRecorder(
@@ -125,6 +132,24 @@ class StreamingVoiceInput:
         """识别结果回调 - 边说边显示"""
         self.current_text = text
 
+        # 流式中间结果 → fcitx5 预编辑区(只发未上屏的增量部分)
+        if self._is_recording and not is_final and text:
+            elapsed = time.time() - self._session_t0
+            logger.info("T+%.2fs 中间结果 len=%d", elapsed, len(text))
+            remainder = text[self._committed_len :]
+            if remainder:
+                self.im_client.send_partial(remainder)
+            # 长语音分段自动上屏:每累计 ≥10 个新字且距上次提交 ≥2 秒
+            if (
+                len(text) - self._committed_len >= 10
+                and time.time() - self._last_commit_ts >= 2.0
+            ):
+                segment = text[self._committed_len :]
+                if self.im_client.send_final(segment):
+                    logger.info("分段上屏 %d 字(累计 %d)", len(segment), self._committed_len + len(segment))
+                    self._committed_len = len(text)
+                    self._last_commit_ts = time.time()
+
         # 识别内容可能包含隐私，默认只显示状态和长度
         if self.config.logging_config.get("show_recognized_text"):
             status = "最终结果" if is_final else "中间结果"
@@ -141,6 +166,25 @@ class StreamingVoiceInput:
         if self._is_recording:
             return
 
+        # 切换到 voice 输入法(为 commit 做准备),记住原 IM 以便恢复
+        if self._fcitx5_remote:
+            try:
+                subprocess.run(
+                    [self._fcitx5_remote, "-s", "voice"], capture_output=True, timeout=1
+                )
+                logger.debug("切换到 voice IM")
+                # 切 IM 会让应用侧输入上下文 focusOut;注入一次无害的 Shift
+                # 敲击强制输入上下文重新挂到 voice 引擎上,否则 final 时
+                # focusedIC 为 null,commit 会静默丢失
+                if shutil.which("ydotool"):
+                    subprocess.run(
+                        ["ydotool", "key", "42:1", "42:0"],
+                        capture_output=True,
+                        timeout=1,
+                    )
+            except Exception as e:
+                logger.debug(f"切换 IM 失败: {e}")
+
         # 记住当前焦点窗口（用于后续输入）
         try:
             result = subprocess.run(
@@ -155,6 +199,9 @@ class StreamingVoiceInput:
 
         print("\n🔴 开始录音，请说话...", flush=True)
         self.current_text = ""
+        self._session_t0 = time.time()
+        self._committed_len = 0
+        self._last_commit_ts = 0.0
 
         # 播放开始提示音
         self.sound.play_start()
@@ -165,24 +212,31 @@ class StreamingVoiceInput:
             logger.error(f"不支持的后端: {backend}")
             return
 
-        streamer = self._get_streamer()
-        streamer.prepare_session()
-
         # 先开始录音，再连接 WebSocket。连接期间的音频会进入 streamer 队列，避免漏掉开头。
-        self._is_recording = True
-        if not self.recorder.start():
-            logger.error("启动录音失败")
-            self._is_recording = False
-            self.sound.play_error()
-            return
-
-        if not streamer.start():
-            logger.error("启动识别器失败")
+        # 连接失败(网络抖动)自动重试一次
+        started = False
+        for attempt in range(2):
+            streamer = self._get_streamer()
+            streamer.prepare_session()
+            self._is_recording = True
+            if not self.recorder.start():
+                logger.error("启动录音失败")
+                self._is_recording = False
+                self.sound.play_error()
+                return
+            if streamer.start():
+                started = True
+                break
+            logger.warning(f"启动识别器失败(第 {attempt + 1} 次)")
             self._is_recording = False
             self.recorder.stop()
-            self.sound.play_error()
             if not self._reuse_connection:
                 self.streamer = None
+            if attempt == 0:
+                time.sleep(0.5)
+        if not started:
+            logger.error("启动识别器失败(已重试)")
+            self.sound.play_error()
 
     def _on_hotkey_release(self):
         """快捷键释放 - 停止录音并输入文字"""
@@ -209,15 +263,22 @@ class StreamingVoiceInput:
             if not self._reuse_connection:
                 self.streamer = None
 
-            text_to_input = final_text or self.current_text
+            text_to_input = (final_text or self.current_text)[self._committed_len :]
             if text_to_input:
-                logger.info("识别完成，准备输入 %s 个字符", len(text_to_input))
-                success = self.text_input.input_text(text_to_input, self._focus_window)
+                # 优先走 fcitx5 插件直接 commit(零粘贴);失败回退剪贴板粘贴
+                delivered = self.im_client.send_final(text_to_input)
+                if delivered:
+                    logger.info("已通过 fcitx5 插件直接上屏 %d 个字符", len(text_to_input))
+                    success = True
+                else:
+                    logger.info("插件不可用,回退剪贴板粘贴 %d 个字符", len(text_to_input))
+                    success = self.text_input.input_text(text_to_input, self._focus_window)
                 if not success:
                     logger.error("文字输入失败")
                     print(f"\033[31m❌ 输入失败，已识别 {len(text_to_input)} 个字符\033[0m")
             else:
                 logger.warning("未识别到文字")
+
 
     def start(self) -> bool:
         """启动语音输入
@@ -229,6 +290,15 @@ class StreamingVoiceInput:
             return True
 
         logger.info("启动流式语音输入...")
+
+        # 创建 fcitx5 插件套接字目录
+        try:
+            import os as _os
+
+            _runtime = _os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{_os.getuid()}")
+            _os.makedirs(_os.path.join(_runtime, "voice-input"), exist_ok=True)
+        except Exception as e:
+            logger.warning(f"创建 IPC 目录失败: {e}")
 
         # 检查配置
         backend = self.config.backend

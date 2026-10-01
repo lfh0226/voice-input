@@ -60,6 +60,7 @@ class XunfeiStreamer:
         self._user_stopped = True
         self._server_final = False
         self._end_frame_sent = False
+        self._stream_t0 = time.time()
         self._connected = False
         self._thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
@@ -234,6 +235,12 @@ class XunfeiStreamer:
 
                 if chunks_in_batch >= self.batch_chunks:
                     self._send_audio_frame(bytes(batch_buffer))
+                    if self._stream_t0:
+                        # 16kHz 单声道 16bit = 32000 字节/秒
+                        duration_ms = int(len(batch_buffer) / 32)
+                        logger.info("T+%.2fs 音频批次 %dms/%d字节",
+                                    time.time() - self._stream_t0,
+                                    duration_ms, len(batch_buffer))
                     batch_buffer.clear()
                     chunks_in_batch = 0
 
