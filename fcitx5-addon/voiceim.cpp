@@ -28,7 +28,7 @@ namespace {
 void debugLog(const std::string &msg) {
     FILE *f = fopen("/tmp/voiceim-debug.log", "a");
     if (f) {
-        fprintf(f, "[voiceim] %s\n", msg.c_str());
+        fprintf(f, "[voiceim %ld] %s\n", (long)time(nullptr), msg.c_str());
         fclose(f);
     }
 }
@@ -127,23 +127,42 @@ private:
         int fd = accept(listenFd_, nullptr, nullptr);
         if (fd < 0)
             return;
-        if (clientFd_ >= 0)
+        if (clientFd_ >= 0) {
+            clientSource_.reset(); // 先移除旧 watcher,避免已关闭 fd 触发事件风暴
             close(clientFd_);
+        }
         clientFd_ = fd;
-        debugLog("client connected");
+        // 非阻塞:绝不允许 recv 阻塞 fcitx5 事件循环
+        int fl = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        debugLog("client connected (non-blocking)");
         clientSource_ = instance_->eventLoop().addIOEvent(
             clientFd_, IOEventFlag::In,
             [this](EventSourceIO *, int, IOEventFlags) -> bool {
+                debugLog("watcher fired");
                 readClient();
+                // 生命周期统一由 clientSource_ 管理(readClient 断开时 reset),
+                // 这里恒返回 true,避免与 reset() 双重移除
                 return true;
             });
+        // 先发 ready 握手(客户端收到后才开始发数据),再手动读一次兜底
+        const char *ready = "{\"type\":\"ready\"}\n";
+        send(clientFd_, ready, strlen(ready), 0);
+        debugLog("ready sent");
+        readClient();
     }
 
     void readClient() {
         char buf[8192];
+        errno = 0;
+        debugLog("recv enter");
         ssize_t n = recv(clientFd_, buf, sizeof(buf) - 1, 0);
         if (n <= 0) {
-            debugLog("client disconnected");
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                return; // 暂无数据(非阻塞 fd),继续等待
+            debugLog("client disconnected n=" + std::to_string(n) +
+                     " errno=" + std::to_string(errno));
+            clientSource_.reset(); // 移除 watcher,防止死循环
             clientFd_ = -1; // 对端断开,等待重连
             return;
         }

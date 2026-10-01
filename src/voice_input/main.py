@@ -61,7 +61,6 @@ class StreamingVoiceInput:
         )
         self.im_client = VoiceIMClient()
         self._fcitx5_remote = shutil.which("fcitx5-remote")
-        self._prev_im: Optional[str] = None
 
         # 流式录音器
         self.recorder = StreamingRecorder(

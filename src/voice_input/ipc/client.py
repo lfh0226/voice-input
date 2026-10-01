@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +29,35 @@ class VoiceIMClient:
         s.connect(_socket_path())
         self._sock = s
 
+    def _wait_ready(self) -> None:
+        """等待插件 ready 握手(边缘触发事件循环必须先 arm watcher 再收数据)."""
+        self._sock.settimeout(2.0)
+        buf = b""
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                chunk = self._sock.recv(256)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise ConnectionError("插件连接已关闭")
+            buf += chunk
+            if b'"ready"' in buf:
+                self._sock.settimeout(None)
+                return
+        raise TimeoutError("等待 ready 握手超时")
+
     def _send(self, payload: dict) -> bool:
-        data = (json.dumps(payload) + "\n").encode("utf-8")
+        # 与 C++ 插件的解析约定严格一致:紧凑分隔符 + 非 ASCII 原样输出
+        data = (
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
         with self._lock:
             for _ in range(2):  # 一次失败重连重试
                 try:
                     if self._sock is None:
                         self._connect()
+                        self._wait_ready()
                     self._sock.settimeout(None)
                     self._sock.sendall(data)
                     return True
@@ -67,8 +90,12 @@ class VoiceIMClient:
                     if not chunk:
                         break
                     buf += chunk
-                    if b'"ack"' in buf or b"ack" in buf:
+                    # 插件明确告知 commit 是否执行:失败则交由回退逻辑
+                    if b'"committed":true' in buf:
                         return True
+                    if b'"committed":false' in buf:
+                        logger.warning("插件 commit 未执行(无焦点输入框),回退粘贴")
+                        return False
             except Exception as e:
                 logger.debug(f"等待 ack 失败: {e}")
             finally:
