@@ -4,6 +4,26 @@
 
 **版本**: v1.0.0
 
+> 🚀 **v1.1.0 已发布**:新增 fcitx5 原生流式插件——语音文字通过输入法通道直接落入光标处,零粘贴。见 [CHANGELOG.md](CHANGELOG.md)。
+
+## v1.1.0 新架构(fcitx5 流式插件)
+
+```
+按住右 Alt ──► daemon:切 voice IM + 录音 + 讯飞流式(80ms/批,dwa=wpgs 语境纠错)
+                     │ 中间结果(每批)                │ 最终结果
+                     ▼                               ▼
+            fcitx5 voiceim 插件(预编辑灰字)      commitString 直接上屏
+```
+
+安装 fcitx5 插件(需已编译):
+
+```bash
+./scripts/build-fcitx5-addon.sh
+./scripts/install-fcitx5-addon.sh
+```
+
+插件特性:预编辑流式显示、commit 延迟 <10ms、失败自动回退剪贴板粘贴。
+
 ## 快速开始
 
 ```bash
