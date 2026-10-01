@@ -19,10 +19,12 @@ class VoiceIMClient:
 
     def __init__(self):
         self._sock: socket.socket | None = None
-        self._lock = threading.Lock()
+        # RLock: send_final 内部会嵌套调用 _send,必须可重入
+        self._lock = threading.RLock()
 
     def _connect(self) -> None:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)  # 连接最多等 1 秒,绝不卡死主线程
         s.connect(_socket_path())
         self._sock = s
 
@@ -33,6 +35,7 @@ class VoiceIMClient:
                 try:
                     if self._sock is None:
                         self._connect()
+                    self._sock.settimeout(None)
                     self._sock.sendall(data)
                     return True
                 except Exception as e:
@@ -74,4 +77,3 @@ class VoiceIMClient:
                 except Exception:
                     pass
             return False
-
