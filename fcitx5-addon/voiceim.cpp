@@ -150,10 +150,16 @@ private:
             ic->updateUserInterface(UserInterfaceComponent::InputPanel);
         } else if (line.find("\"type\":\"final\"") != std::string::npos) {
             auto *ic = focusedIC();
+            bool committed = false;
             if (ic && !text.empty()) {
                 clearPreedit();
                 ic->commitString(text);
+                committed = true;
             }
+            // 必须 ack,否则 daemon 等待超时后会走剪贴板回退造成重复输入
+            std::string ack = committed ? "{\"type\":\"ack\",\"committed\":true}\n"
+                                        : "{\"type\":\"ack\",\"committed\":false}\n";
+            send(clientFd_, ack.c_str(), ack.size(), 0);
         } else if (line.find("\"type\":\"ping\"") != std::string::npos) {
             const char *pong = "{\"type\":\"pong\"}\n";
             send(clientFd_, pong, strlen(pong), 0);
