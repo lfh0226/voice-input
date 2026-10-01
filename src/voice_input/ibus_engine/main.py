@@ -4,7 +4,7 @@ import gi
 
 gi.require_version("IBus", "1.0")
 
-from gi.repository import IBus  # noqa: E402
+from gi.repository import GLib, IBus  # noqa: E402
 
 from voice_input.ibus_engine.engine import VoiceEngine  # noqa: E402
 
@@ -28,4 +28,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
