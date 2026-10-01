@@ -25,6 +25,14 @@ namespace fcitx {
 
 namespace {
 
+void debugLog(const std::string &msg) {
+    FILE *f = fopen("/tmp/voiceim-debug.log", "a");
+    if (f) {
+        fprintf(f, "[voiceim] %s\n", msg.c_str());
+        fclose(f);
+    }
+}
+
 std::string socketPath() {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     std::string base = runtime ? runtime : "/run/user/1000";
@@ -103,8 +111,10 @@ private:
             listen(listenFd_, 1) < 0) {
             close(listenFd_);
             listenFd_ = -1;
+            debugLog("bind/listen FAILED: " + std::string(strerror(errno)));
             return;
         }
+        debugLog("listening on " + path);
         listenSource_ = instance_->eventLoop().addIOEvent(
             listenFd_, IOEventFlag::In,
             [this](EventSourceIO *, int, IOEventFlags) -> bool {
@@ -120,6 +130,7 @@ private:
         if (clientFd_ >= 0)
             close(clientFd_);
         clientFd_ = fd;
+        debugLog("client connected");
         clientSource_ = instance_->eventLoop().addIOEvent(
             clientFd_, IOEventFlag::In,
             [this](EventSourceIO *, int, IOEventFlags) -> bool {
@@ -132,6 +143,7 @@ private:
         char buf[8192];
         ssize_t n = recv(clientFd_, buf, sizeof(buf) - 1, 0);
         if (n <= 0) {
+            debugLog("client disconnected");
             clientFd_ = -1; // 对端断开,等待重连
             return;
         }
@@ -151,16 +163,22 @@ private:
         std::string text = extractText(line);
         if (line.find("\"type\":\"partial\"") != std::string::npos) {
             auto *ic = focusedIC();
-            if (!ic || text.empty())
+            if (!ic || text.empty()) {
+                debugLog("partial skipped: ic=" + std::string(ic ? "yes" : "null") +
+                         " text_len=" + std::to_string(text.size()));
                 return;
+            }
             Text preedit;
             preedit.append(text, TextFormatFlag::HighLight);
             preedit.setCursor(text.size());
             ic->inputPanel().setClientPreedit(preedit);
             ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+            debugLog("partial preedit set, len=" + std::to_string(text.size()));
         } else if (line.find("\"type\":\"final\"") != std::string::npos) {
             auto *ic = focusedIC();
             bool committed = false;
+            debugLog("final: ic=" + std::string(ic ? "yes" : "null") +
+                     " text_len=" + std::to_string(text.size()));
             if (ic && !text.empty()) {
                 clearPreedit();
                 ic->commitString(text);
