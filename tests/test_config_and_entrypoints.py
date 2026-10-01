@@ -34,6 +34,13 @@ def test_xunfei_final_result_timeout_defaults_to_stable_value(tmp_path: Path) ->
     assert config.xunfei["final_result_timeout"] == 3.0
 
 
+def test_resident_listening_is_opt_in(tmp_path: Path) -> None:
+    """Continuous microphone capture must stay disabled until explicitly chosen."""
+    config = Config(tmp_path / "missing.yaml")
+    assert config.resident["enabled"] is False
+    assert config.resident["prebuffer_ms"] > 0
+
+
 def test_project_exposes_lb_voice_and_legacy_voice_input_scripts() -> None:
     """The shell launcher can rely on lb-voice while legacy voice-input remains available."""
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
