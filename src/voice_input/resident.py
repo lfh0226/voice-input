@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class ASRSessionRelay:
 
         self._lock = threading.RLock()
         self._session: object | None = None
+        self._session_created_at: float | None = None
         self._starting: set[object] = set()
         self._workers: list[threading.Thread] = []
         self._stopped = False
@@ -53,6 +55,7 @@ class ASRSessionRelay:
                 return
             session = self._create_session()
             self._session = session
+            self._session_created_at = time.time()
             self._starting.add(session)
 
         thread = threading.Thread(target=self._start_session, args=(session,), daemon=True)
@@ -116,6 +119,18 @@ class ASRSessionRelay:
             return
         if text:
             self._on_final(text)
+
+    def recycle_if_stale(self, max_age_s: float) -> None:
+        """空闲预热会话超过服务器超时后已失效,主动接力新会话."""
+        with self._lock:
+            session = self._session
+            created = self._session_created_at
+        if session is None or created is None:
+            return
+        if time.time() - created <= max_age_s:
+            return
+        self.finish_segment()  # 后台结束旧会话并立即 warm() 下一个
+        return
 
     def stop(self) -> None:
         """Stop accepting sessions and clean up the active one."""

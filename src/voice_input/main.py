@@ -85,14 +85,17 @@ class StreamingVoiceInput:
         # 快捷键监听器
         self.hotkey_listener: Optional[HotkeyListener] = None
 
-        # V2.1 resident listening. This replaces hotkey-driven capture with a
-        # continuously read microphone, local VAD segmentation and ASR session
-        # relay. It stays disabled until explicitly configured.
+        # V2.1: relay 提供预热会话池(WS 常驻保温,零数据流出)。
+        # 热键按下 = 门控打开,音频才写入会话;空闲期仅保持连接,合规零采集。
         self._resident_enabled = bool(config.resident.get("enabled", False))
         self.resident_vad: EnergyVAD | None = None
         self.resident_relay: ASRSessionRelay | None = None
         self._resident_committed_len = 0
-        if self._resident_enabled:
+        # 热键门控状态
+        self._relay_gate = False
+        self._gate_prebuffer: list[bytes] = []
+        self._relay_warmed_at = 0.0
+        if True:
             resident_config = config.resident
             vad_config = VADConfig(
                 sample_rate=config.recording.get("sample_rate", 16000),
@@ -106,23 +109,26 @@ class StreamingVoiceInput:
                 prebuffer_ms=resident_config.get("prebuffer_ms", 240),
                 max_segment_ms=resident_config.get("max_segment_ms", 60_000),
             )
-            self.resident_vad = EnergyVAD(
-                vad_config,
-                on_segment_start=self._on_resident_segment_start,
-                on_speech=self._on_resident_speech,
-                on_segment_end=self._on_resident_segment_end,
-            )
+            if self._resident_enabled:
+                self.resident_vad = EnergyVAD(
+                    vad_config,
+                    on_segment_start=self._on_resident_segment_start,
+                    on_speech=self._on_resident_speech,
+                    on_segment_end=self._on_resident_segment_end,
+                )
             self.resident_relay = ASRSessionRelay(
                 create_session=lambda: self._create_streamer(
-                    self._on_resident_result
+                    self._on_relay_result
                 ),
                 on_result=lambda text, final: None,
-                on_final=self._on_resident_final,
+                on_final=self._on_relay_final,
                 final_result_timeout=config.xunfei.get(
                     "final_result_timeout", 3.0
                 ),
                 reuse_connection=True,
             )
+            self.resident_relay.warm()
+            self._relay_warmed_at = time.time()
 
         # 运行状态
         self._running = False
@@ -142,7 +148,17 @@ class StreamingVoiceInput:
             logger.debug(f"日志配置: {log_config}")
 
     def _on_audio_chunk(self, pcm_bytes: bytes):
-        """音频块回调 - 发送到流式识别器"""
+        """音频块回调 - 热键门控:仅按住 Alt_R 期间音频才离开设备"""
+        if self._relay_gate:
+            if self.resident_relay and self.resident_relay.is_ready:
+                # 连接就绪:先冲刷门控期间积压的音频,再送当前块
+                while self._gate_prebuffer:
+                    self.resident_relay.send_audio(self._gate_prebuffer.pop(0))
+                self.resident_relay.send_audio(pcm_bytes)
+            else:
+                # 预热会话尚未就绪(罕见):本地暂存,就绪后补发
+                self._gate_prebuffer.append(pcm_bytes)
+            return
         if self.resident_vad:
             self.resident_vad.feed(pcm_bytes)
             return
@@ -200,6 +216,13 @@ class StreamingVoiceInput:
         """快捷键按下 - 开始录音"""
         if self._is_recording:
             return
+
+        # 预热会话接力:回收过期空闲会话,保证 Alt 按下即有热连接
+        if self.resident_relay:
+            self.resident_relay.recycle_if_stale(max_age_s=12.0)
+            self._relay_gate = True
+            self._resident_committed_len = 0
+            self._last_commit_ts = time.time()
 
         # 切换到 voice 输入法(为 commit 做准备),记住原 IM 以便恢复
         if self._fcitx5_remote:
@@ -273,6 +296,26 @@ class StreamingVoiceInput:
             logger.error("启动识别器失败(已重试)")
             self.sound.play_error()
 
+    def _on_relay_result(self, text: str, is_final: bool) -> None:
+        """relay 会话的流式结果回调(热键门控模式)."""
+        self._on_resident_result(text, is_final)
+
+    def _on_relay_final(self, text: str) -> None:
+        """relay 会话最终结果:插件上屏,失败回退剪贴板(热键门控有焦点窗口)."""
+        remainder = text[self._resident_committed_len :]
+        self._resident_committed_len = max(0, len(text))
+        if not remainder:
+            return
+        delivered = self.im_client.send_final(remainder)
+        if delivered:
+            logger.info("会话已通过插件上屏 %d 个字符", len(remainder))
+            return
+        if self._focus_window:
+            logger.warning("插件上屏失败,回退剪贴板粘贴 %d 个字符", len(remainder))
+            self.text_input.input_text(remainder, self._focus_window)
+        else:
+            logger.error("会话上屏失败,已丢弃 %d 个字符", len(remainder))
+
     def _on_resident_segment_start(self, pcm_bytes: bytes) -> None:
         """Feed speech prebuffer into the already-warm ASR session."""
         self._resident_committed_len = 0
@@ -334,8 +377,14 @@ class StreamingVoiceInput:
 
         self._is_recording = False
 
-        # 停止录音
+        # 停止本地采集(合规:按键松开即停止采集),会话在后台完成 final
         self.recorder.stop()
+
+        if self._relay_gate:
+            self._relay_gate = False
+            if self.resident_relay:
+                self.resident_relay.finish_segment()
+            return
 
         # 播放结束提示音
         self.sound.play_end()
