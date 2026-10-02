@@ -195,19 +195,14 @@ class StreamingVoiceInput:
             elapsed = time.time() - self._session_t0
             logger.info("T+%.2fs 中间结果 len=%d", elapsed, len(text))
             remainder = text[self._committed_len :]
-            if remainder:
+            # 逐段可见模式:每个中间结果到达,立即把新增增量上屏到光标处
+            segment = text[self._committed_len :]
+            if segment and self.im_client.send_final(segment):
+                timeline.mark(f"增量上屏 {len(segment)} 字(累计 {self._committed_len + len(segment)})")
+                logger.info("增量上屏 %d 字(累计 %d)", len(segment), self._committed_len + len(segment))
+                self._committed_len = len(text)
+            elif remainder:
                 self.im_client.send_partial(remainder)
-            # 长语音分段自动上屏:每累计 ≥10 个新字且距上次提交 ≥2 秒
-            if (
-                len(text) - self._committed_len >= 10
-                and time.time() - self._last_commit_ts >= 2.0
-            ):
-                segment = text[self._committed_len :]
-                if self.im_client.send_final(segment):
-                    timeline.mark(f"分段上屏 {len(segment)} 字")
-                    logger.info("分段上屏 %d 字(累计 %d)", len(segment), self._committed_len + len(segment))
-                    self._committed_len = len(text)
-                    self._last_commit_ts = time.time()
 
         # 识别内容可能包含隐私，默认只显示状态和长度
         if self.config.logging_config.get("show_recognized_text"):
