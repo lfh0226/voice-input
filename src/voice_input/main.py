@@ -92,6 +92,7 @@ class StreamingVoiceInput:
         self.resident_vad: EnergyVAD | None = None
         self.resident_relay: ASRSessionRelay | None = None
         self._resident_committed_len = 0
+        self._pending_final_committed = 0  # 上一个会话的快照(防竞态)
         # 热键门控状态
         self._relay_gate = False
         self._gate_prebuffer: list[bytes] = []
@@ -301,8 +302,13 @@ class StreamingVoiceInput:
         self._on_resident_result(text, is_final)
 
     def _on_relay_final(self, text: str) -> None:
-        """relay 会话最终结果:预编辑被 commit 原子替换(无删除动作)."""
-        delivered = self.im_client.send_final(text)
+        """relay 会话最终结果:使用会话快照计算剩余增量."""
+        committed = self._pending_final_committed
+        self._pending_final_committed = 0
+        remainder = text[committed:]
+        timeline.mark(f"final: committed={committed} total={len(text)} remainder={len(remainder)}")
+        delivered = self.im_client.send_final(remainder)
+        timeline.mark(f"插件 commit delivered={delivered} len={len(remainder)}")
         timeline.mark(f"final commit delivered={delivered} len={len(text)}")
         if delivered:
             logger.info("原子上屏 %d 个字符", len(text))
@@ -344,7 +350,11 @@ class StreamingVoiceInput:
 
     def _on_resident_final(self, text: str) -> None:
         """Commit the final result produced by a relayed session."""
-        delivered = self.im_client.send_final(text)
+        committed = self._pending_final_committed
+        self._pending_final_committed = 0
+        remainder = text[committed:]
+        timeline.mark(f"final: committed={committed} total={len(text)} remainder={len(remainder)}")
+        delivered = self.im_client.send_final(remainder)
         timeline.mark(f"final commit delivered={delivered} len={len(text)}")
         if delivered:
             logger.info("常驻会话原子上屏 %d 个字符", len(text))
@@ -365,6 +375,8 @@ class StreamingVoiceInput:
         if self._relay_gate:
             self._relay_gate = False
             if self.resident_relay:
+                # 快照当前 committed_len 供 finalize 使用(防竞态)
+                self._pending_final_committed = self._resident_committed_len
                 self.resident_relay.finish_segment()
             return
 
