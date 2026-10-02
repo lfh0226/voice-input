@@ -190,19 +190,15 @@ class StreamingVoiceInput:
         """识别结果回调 - 边说边显示"""
         self.current_text = text
 
-        # 流式中间结果 → fcitx5 预编辑区(只发未上屏的增量部分)
+        # 流式中间结果 → 预编辑区(讯飞纠错实时反映);final → 原子提交
         if self._is_recording and not is_final and text:
             elapsed = time.time() - self._session_t0
+            timeline.mark(f"中间结果 len={len(text)}")
             logger.info("T+%.2fs 中间结果 len=%d", elapsed, len(text))
-            remainder = text[self._committed_len :]
-            # 逐段可见模式:每个中间结果到达,立即把新增增量上屏到光标处
-            segment = text[self._committed_len :]
-            if segment and self.im_client.send_final(segment):
-                timeline.mark(f"增量上屏 {len(segment)} 字(累计 {self._committed_len + len(segment)})")
-                logger.info("增量上屏 %d 字(累计 %d)", len(segment), self._committed_len + len(segment))
-                self._committed_len = len(text)
-            elif remainder:
-                self.im_client.send_partial(remainder)
+            self.im_client.send_partial(text)
+        elif is_final and text:
+            timeline.mark(f"最终结果 len={len(text)}")
+            self.im_client.send_final(text)
 
         # 识别内容可能包含隐私，默认只显示状态和长度
         if self.config.logging_config.get("show_recognized_text"):
@@ -300,49 +296,22 @@ class StreamingVoiceInput:
             logger.error("启动识别器失败(已重试)")
             self.sound.play_error()
 
-    def _replace_committed_text(self, full_text: str, committed_len: int) -> bool:
-        """退格删除已逐字上屏的 committed_len 个字符,再提交纠错后的完整文本.
-
-        Returns: True=已通过插件上屏;False=需走剪贴板回退(上屏剩余部分).
-        """
-        if committed_len > 0:
-            if not shutil.which("ydotool"):
-                logger.warning("ydotool 不可用,无法退格已上屏文本")
-                return False
-            keys = []
-            for _ in range(committed_len):
-                keys += ["14:1", "14:0"]  # KEY_BACKSPACE press/release
-            try:
-                subprocess.run(["ydotool", "key", *keys], capture_output=True, timeout=10)
-            except Exception as e:
-                logger.warning(f"退格注入失败: {e}")
-                return False
-            time.sleep(0.3)  # 等应用处理完退格
-        return self.im_client.send_final(full_text)
-
     def _on_relay_result(self, text: str, is_final: bool) -> None:
         """relay 会话的流式结果回调(热键门控模式)."""
         self._on_resident_result(text, is_final)
 
     def _on_relay_final(self, text: str) -> None:
-        """relay 会话最终结果:退格替换已上屏增量,提交纠错后的完整文本."""
-        committed = self._resident_committed_len
-        self._resident_committed_len = max(0, len(text))
-        timeline.mark(f"final 替换: 已上屏={committed} 纠错后={len(text)}")
-
-        # 替换模式:退格删除逐字上屏的增量 → 插件提交纠错后的完整文本
-        delivered = self._replace_committed_text(text, committed)
+        """relay 会话最终结果:预编辑被 commit 原子替换(无删除动作)."""
+        delivered = self.im_client.send_final(text)
+        timeline.mark(f"final commit delivered={delivered} len={len(text)}")
         if delivered:
-            logger.info("替换式上屏 %d 个字符", len(text))
-            return
-
-        # 替换失败(ydotool 不可用等):退回剪贴板粘贴剩余部分
-        remainder = text[committed:]
-        if not remainder:
+            logger.info("原子上屏 %d 个字符", len(text))
             return
         if self._focus_window:
-            logger.warning("替换失败,回退剪贴板粘贴剩余 %d 个字符", len(remainder))
-            self.text_input.input_text(remainder, self._focus_window)
+            logger.warning("原子上屏失败,回退剪贴板粘贴 %d 个字符", len(text))
+            self.text_input.input_text(text, self._focus_window)
+        else:
+            logger.error("会话上屏失败,已丢弃 %d 个字符", len(text))
 
     def _on_resident_segment_start(self, pcm_bytes: bytes) -> None:
         """Feed speech prebuffer into the already-warm ASR session."""
@@ -382,22 +351,13 @@ class StreamingVoiceInput:
                 self._last_commit_ts = time.time()
 
     def _on_resident_final(self, text: str) -> None:
-        """Commit the final remainder produced by a relayed session."""
-        committed = self._resident_committed_len
-        self._resident_committed_len = max(0, len(text))
-        if not text and not committed:
-            return
-
-        delivered = self._replace_committed_text(text, committed)
+        """Commit the final result produced by a relayed session."""
+        delivered = self.im_client.send_final(text)
+        timeline.mark(f"final commit delivered={delivered} len={len(text)}")
         if delivered:
-            logger.info("常驻会话替换式上屏 %d 个字符", len(text))
+            logger.info("常驻会话原子上屏 %d 个字符", len(text))
             return
-
-        # 替换失败:回退剪贴板粘贴剩余部分(不做盲目盲打)
-        remainder = text[committed:]
-        logger.error("常驻会话替换失败,剩余 %d 个字符转剪贴板", len(remainder))
-        if remainder and self._focus_window:
-            self.text_input.input_text(remainder, self._focus_window)
+        logger.error("常驻会话上屏失败,丢弃 %d 个字符", len(text))
 
     def _on_hotkey_release(self):
         """快捷键释放 - 停止录音并输入文字"""
