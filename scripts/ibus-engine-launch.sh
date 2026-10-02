@@ -1,6 +1,6 @@
 #!/bin/bash
 # IBus 引擎启动器：由 ibus-daemon 调用，切换到工作目录后运行引擎
-cd /home/lfh/projects/daily/voice-input
+cd "$(dirname "$0")/.."
 
 # ibus write-cache / ibus-daemon 会用 --xml 询问组件的引擎清单
 if [ "${1:-}" = "--xml" ]; then

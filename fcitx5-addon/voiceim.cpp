@@ -26,7 +26,9 @@ namespace fcitx {
 namespace {
 
 void debugLog(const std::string &msg) {
-    FILE *f = fopen("/tmp/voiceim-debug.log", "a");
+    const char *dbg = getenv("VOICEIM_DEBUG_LOG");
+        if (!dbg) return;
+        FILE *f = fopen(dbg, "a");
     if (f) {
         fprintf(f, "[voiceim %ld] %s\n", (long)time(nullptr), msg.c_str());
         fclose(f);
