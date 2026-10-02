@@ -102,6 +102,7 @@ private:
         if (!ic)
             return;
         ic->inputPanel().setClientPreedit(Text());
+        ic->inputPanel().setPreedit(Text());
         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
     }
 
@@ -204,6 +205,7 @@ private:
             preedit.append(text, TextFormatFlag::HighLight);
             preedit.setCursor(text.size());
             ic->inputPanel().setClientPreedit(preedit);
+            ic->inputPanel().setPreedit(preedit); // 悬浮窗显示,应用不支持 client 预编辑时可见
             ic->updateUserInterface(UserInterfaceComponent::InputPanel);
             debugLog("partial preedit set, len=" + std::to_string(text.size()));
         } else if (line.find("\"type\":\"final\"") != std::string::npos) {
