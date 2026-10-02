@@ -335,20 +335,12 @@ class StreamingVoiceInput:
         if is_final or not text:
             return
 
-        remainder = text[self._resident_committed_len :]
-        if remainder:
-            self.im_client.send_partial(remainder)
-
-        # Reuse the long-speech policy from hotkey mode: commit a stable
-        # prefix so a very long utterance is not held in preedit forever.
-        if (
-            len(text) - self._resident_committed_len >= 10
-            and time.time() - self._last_commit_ts >= 2.0
-        ):
-            segment = text[self._resident_committed_len :]
-            if self.im_client.send_final(segment):
-                self._resident_committed_len = len(text)
-                self._last_commit_ts = time.time()
+        # 逐段可见:每个中间结果到达,立即把新增增量 commit 到光标处
+        # (不经过预编辑,不重复显示)
+        segment = text[self._resident_committed_len :]
+        if segment and self.im_client.send_final(segment):
+            self._resident_committed_len = len(text)
+            self._last_commit_ts = time.time()
 
     def _on_resident_final(self, text: str) -> None:
         """Commit the final result produced by a relayed session."""
