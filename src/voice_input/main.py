@@ -18,6 +18,7 @@ from voice_input.resident import ASRSessionRelay
 from voice_input.recorder import StreamingRecorder
 from voice_input.vad import EnergyVAD, VADConfig
 from voice_input.backends import get_streamer
+from voice_input.timeline import timeline
 from voice_input.backends.base import StreamingSession
 from voice_input.sound import SoundFeedback
 from voice_input.typer import TextInput
@@ -143,6 +144,12 @@ class StreamingVoiceInput:
         logging.getLogger().setLevel(level)
         logger.setLevel(level)
 
+        # 毫秒级时间线(可用 logging.timeline: false 关闭)
+        timeline.set_enabled(bool(log_config.get("timeline", True)))
+        from voice_input.logger_config import get_log_file
+
+        timeline.use_file(str(get_log_file()).replace("voice-input.log", "timeline.log"))
+
         if level == logging.DEBUG:
             logger.debug("调试模式已启用")
             logger.debug(f"日志配置: {log_config}")
@@ -197,6 +204,7 @@ class StreamingVoiceInput:
             ):
                 segment = text[self._committed_len :]
                 if self.im_client.send_final(segment):
+                    timeline.mark(f"分段上屏 {len(segment)} 字")
                     logger.info("分段上屏 %d 字(累计 %d)", len(segment), self._committed_len + len(segment))
                     self._committed_len = len(text)
                     self._last_commit_ts = time.time()
@@ -216,6 +224,7 @@ class StreamingVoiceInput:
         """快捷键按下 - 开始录音"""
         if self._is_recording:
             return
+        timeline.reset("热键按下")
 
         # 预热会话接力:回收过期空闲会话,保证 Alt 按下即有热连接
         if self.resident_relay:
@@ -231,7 +240,7 @@ class StreamingVoiceInput:
                     [self._fcitx5_remote, "-s", "voice"], capture_output=True, timeout=1
                 )
                 logger.debug("切换到 voice IM")
-                # 切 IM 会让应用侧输入上下文 focusOut;注入一次无害的 Shift
+                timeline.mark("IM 已切到 voice + Shift 敲击注入")                # 切 IM 会让应用侧输入上下文 focusOut;注入一次无害的 Shift
                 # 敲击强制输入上下文重新挂到 voice 引擎上,否则 final 时
                 # focusedIC 为 null,commit 会静默丢失
                 if shutil.which("ydotool"):
@@ -307,6 +316,7 @@ class StreamingVoiceInput:
         if not remainder:
             return
         delivered = self.im_client.send_final(remainder)
+        timeline.mark(f"插件 commit delivered={delivered} len={len(remainder)}")
         if delivered:
             logger.info("会话已通过插件上屏 %d 个字符", len(remainder))
             return
@@ -376,6 +386,7 @@ class StreamingVoiceInput:
             return
 
         self._is_recording = False
+        timeline.mark("热键松开,停止本地采集")
 
         # 停止本地采集(合规:按键松开即停止采集),会话在后台完成 final
         self.recorder.stop()

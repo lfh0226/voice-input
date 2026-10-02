@@ -91,9 +91,14 @@ class VoiceIMClient:
                         break
                     buf += chunk
                     # 插件明确告知 commit 是否执行:失败则交由回退逻辑
+                    from voice_input.timeline import timeline
+
                     if b'"committed":true' in buf:
+                        timeline.mark("IPC ack: committed=true")
                         return True
                     if b'"committed":false' in buf:
+                        timeline.mark("IPC ack: committed=false")
+                        return False
                         logger.warning("插件 commit 未执行(无焦点输入框),回退粘贴")
                         return False
             except Exception as e:

@@ -235,12 +235,10 @@ class XunfeiStreamer:
 
                 if chunks_in_batch >= self.batch_chunks:
                     self._send_audio_frame(bytes(batch_buffer))
-                    if self._stream_t0:
-                        # 16kHz 单声道 16bit = 32000 字节/秒
-                        duration_ms = int(len(batch_buffer) / 32)
-                        logger.info("T+%.2fs 音频批次 %dms/%d字节",
-                                    time.time() - self._stream_t0,
-                                    duration_ms, len(batch_buffer))
+                    from voice_input.timeline import timeline
+                    # 16kHz 单声道 16bit = 32000 字节/秒
+                    duration_ms = int(len(batch_buffer) / 32)
+                    timeline.mark(f"音频批次 {duration_ms}ms/{len(batch_buffer)}B")
                     batch_buffer.clear()
                     chunks_in_batch = 0
 
