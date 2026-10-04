@@ -66,6 +66,7 @@ class StreamingVoiceInput:
         self._committed_len = 0   # 本次会话已通过插件上屏的字符数
         self._last_commit_ts = 0.0
         self._fcitx5_remote = shutil.which("fcitx5-remote")
+        self._original_im = ""  # 语音输入前记住原 IM，commit 后恢复
 
         # 流式录音器
         self.recorder = StreamingRecorder(
@@ -232,6 +233,12 @@ class StreamingVoiceInput:
         # 切换到 voice 输入法(为 commit 做准备),记住原 IM 以便恢复
         if self._fcitx5_remote:
             try:
+                # 先记住当前 IM，commit 完成后恢复（用户无感，不改变输入法状态）
+                result = subprocess.run(
+                    [self._fcitx5_remote, "-n"], capture_output=True, text=True, timeout=1
+                )
+                self._original_im = result.stdout.strip() if result.returncode == 0 else ""
+                logger.debug("记住原 IM: %s", self._original_im)
                 subprocess.run(
                     [self._fcitx5_remote, "-s", "voice"], capture_output=True, timeout=1
                 )
@@ -312,6 +319,20 @@ class StreamingVoiceInput:
             logger.error("启动识别器失败(已重试)")
             self.sound.play_error()
 
+    def _restore_original_im(self):
+        """语音输入完成后恢复用户原来的输入法（对用户完全透明）。"""
+        if not self._fcitx5_remote or not self._original_im:
+            return
+        try:
+            subprocess.run(
+                [self._fcitx5_remote, "-s", self._original_im],
+                capture_output=True, timeout=1,
+            )
+            logger.debug("恢复原 IM: %s", self._original_im)
+            timeline.mark("IM 已恢复原输入法")
+        except Exception as e:
+            logger.debug(f"恢复 IM 失败: {e}")
+
     def _on_relay_result(self, text: str, is_final: bool) -> None:
         """relay 会话的流式结果回调(热键门控模式)."""
         self._on_resident_result(text, is_final)
@@ -327,12 +348,15 @@ class StreamingVoiceInput:
         timeline.mark(f"final commit delivered={delivered} len={len(text)}")
         if delivered:
             logger.info("原子上屏 %d 个字符", len(text))
+            self._restore_original_im()
             return
         if self._focus_window:
             logger.warning("原子上屏失败,回退剪贴板粘贴 %d 个字符", len(text))
             self.text_input.input_text(text, self._focus_window)
+            self._restore_original_im()
         else:
             logger.error("会话上屏失败,已丢弃 %d 个字符", len(text))
+            self._restore_original_im()
 
     def _on_resident_segment_start(self, pcm_bytes: bytes) -> None:
         """Feed speech prebuffer into the already-warm ASR session."""
@@ -389,6 +413,8 @@ class StreamingVoiceInput:
                 # 快照当前 committed_len 供 finalize 使用(防竞态)
                 self._pending_final_committed = self._resident_committed_len
                 self.resident_relay.finish_segment()
+            # 恢复原输入法（用户无感，不改变语音输入前的 IM 状态）
+            self._restore_original_im()
             return
 
         if not self._is_recording:
