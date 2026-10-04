@@ -128,6 +128,7 @@ class StreamingVoiceInput:
                     "final_result_timeout", 3.0
                 ),
                 reuse_connection=True,
+                stale_max_age_s=8.0,
             )
             self.resident_relay.warm()
             self._relay_warmed_at = time.time()
@@ -218,9 +219,11 @@ class StreamingVoiceInput:
             return
         timeline.reset("热键按下")
 
-        # 预热会话接力:回收过期空闲会话,保证 Alt 按下即有热连接
-        if self.resident_relay:
-            self.resident_relay.recycle_if_stale(max_age_s=12.0)
+        use_relay = bool(self.resident_relay)
+
+        # 预热会话接力:回收过期空闲会话(讯飞服务端 ~10s 超时,8s 内必须回收),保证 Alt 按下即有热连接
+        if use_relay:
+            self.resident_relay.recycle_if_stale(max_age_s=8.0)
             self._relay_gate = True
             self._resident_committed_len = 0
             self._last_commit_ts = time.time()
@@ -261,9 +264,20 @@ class StreamingVoiceInput:
         self._session_t0 = time.time()
         self._committed_len = 0
         self._last_commit_ts = 0.0
+        self._is_recording = True
 
         # 播放开始提示音
         self.sound.play_start()
+
+        if use_relay:
+            # relay 模式:音频走预热会话,不再创建旧 streamer 连接（避免产生无人使用的
+            # 空闲 WS 连接,该连接 20s 后被讯飞服务端踢掉并产生 "server read msg timeout"）
+            if not self.recorder.start():
+                logger.error("relay 模式启动录音失败")
+                self._relay_gate = False
+                self._is_recording = False
+                self.sound.play_error()
+            return
 
         # 创建流式识别器
         backend = self.config.backend
@@ -363,6 +377,19 @@ class StreamingVoiceInput:
 
     def _on_hotkey_release(self):
         """快捷键释放 - 停止录音并输入文字"""
+        if self._relay_gate:
+            self._relay_gate = False
+            self._is_recording = False
+            timeline.mark("热键松开,停止本地采集")
+            # 停止本地采集(合规:按键松开即停止采集)
+            self.recorder.stop()
+            self.sound.play_end()
+            if self.resident_relay:
+                # 快照当前 committed_len 供 finalize 使用(防竞态)
+                self._pending_final_committed = self._resident_committed_len
+                self.resident_relay.finish_segment()
+            return
+
         if not self._is_recording:
             return
 
@@ -371,14 +398,6 @@ class StreamingVoiceInput:
 
         # 停止本地采集(合规:按键松开即停止采集),会话在后台完成 final
         self.recorder.stop()
-
-        if self._relay_gate:
-            self._relay_gate = False
-            if self.resident_relay:
-                # 快照当前 committed_len 供 finalize 使用(防竞态)
-                self._pending_final_committed = self._resident_committed_len
-                self.resident_relay.finish_segment()
-            return
 
         # 播放结束提示音
         self.sound.play_end()
@@ -487,6 +506,10 @@ class StreamingVoiceInput:
             mode=self.config.hotkey.get("mode", "hold"),
         )
         self.hotkey_listener.start()
+
+        # 启动预热会话后台过期回收心跳（8s 后自动接力新会话,保证 Alt 按下始终有热连接）
+        if self.resident_relay:
+            self.resident_relay.start_heartbeat()
 
         self._running = True
         logger.info(f"语音输入已就绪，按住 {self.config.hotkey.get('trigger', 'alt')} 开始录音")
