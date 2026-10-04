@@ -3,11 +3,13 @@
 import logging
 import select
 import threading
+import time
 from typing import Callable
 
 logger = logging.getLogger(__name__)
 
 HOTKEY_POLL_TIMEOUT = 0.1
+DEVICE_RESCAN_INTERVAL = 5.0  # seconds between device re-scans
 
 # Try to import evdev for Wayland/native Linux support
 try:
@@ -73,6 +75,7 @@ class HotkeyListener:
         self._pressed_keys: set[int] = set()
         self._hotkey_codes: list[int | list[int]] = []
         self._devices: list[InputDevice] = []
+        self._last_rescan: float = 0.0
 
         self._parse_hotkey()
 
@@ -173,15 +176,31 @@ class HotkeyListener:
                 # Check if device has keyboard keys
                 if ecodes.EV_KEY in capabilities:
                     keys = capabilities[ecodes.EV_KEY]
-                    # Check for ALT key as indicator of keyboard
-                    if ecodes.KEY_LEFTALT in keys or ecodes.KEY_RIGHTALT in keys:
+                    # Check for common keyboard indicators: ALT key or letter keys
+                    has_alt = ecodes.KEY_LEFTALT in keys or ecodes.KEY_RIGHTALT in keys
+                    has_letters = ecodes.KEY_A in keys and ecodes.KEY_Z in keys
+                    if has_alt or has_letters:
                         logger.info(f"Found keyboard device: {dev.name} ({path})")
                         devices.append(dev)
+                    else:
+                        logger.debug(f"Skipped non-keyboard device: {dev.name} ({path})")
             except Exception as e:
                 logger.debug(f"Could not open device {path}: {e}")
                 continue
 
         return devices
+
+    def _rescan_devices(self) -> None:
+        """Re-scan for newly connected keyboard devices (e.g. Bluetooth)."""
+        try:
+            current_paths = {dev.path for dev in self._devices}
+            new_devices = self._find_keyboard_devices()
+            for dev in new_devices:
+                if dev.path not in current_paths:
+                    logger.info(f"New keyboard device discovered: {dev.name} ({dev.path})")
+                    self._devices.append(dev)
+        except Exception as e:
+            logger.debug(f"Device re-scan failed: {e}")
 
     def _run(self) -> None:
         """Main event loop."""
@@ -211,6 +230,12 @@ class HotkeyListener:
                         continue
                     except Exception as e:
                         logger.debug(f"Error reading from {dev.name}: {e}")
+
+                # 定期重新扫描新连接的键盘设备（蓝牙键盘可能晚于服务启动）
+                now = time.monotonic()
+                if now - self._last_rescan >= DEVICE_RESCAN_INTERVAL:
+                    self._rescan_devices()
+                    self._last_rescan = now
 
             except Exception as e:
                 logger.error(f"Error in event loop: {e}")
