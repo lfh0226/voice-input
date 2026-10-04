@@ -164,8 +164,12 @@ class HotkeyListener:
                     if self.on_release:
                         self.on_release()
 
-    def _find_keyboard_devices(self) -> list[InputDevice]:
-        """Find all keyboard input devices."""
+    def _find_keyboard_devices(self, log_found: bool = True) -> list[InputDevice]:
+        """Find all keyboard input devices.
+
+        Args:
+            log_found: Whether to log each device found (set False for periodic re-scans).
+        """
         devices = []
 
         for path in evdev.list_devices():
@@ -180,7 +184,8 @@ class HotkeyListener:
                     has_alt = ecodes.KEY_LEFTALT in keys or ecodes.KEY_RIGHTALT in keys
                     has_letters = ecodes.KEY_A in keys and ecodes.KEY_Z in keys
                     if has_alt or has_letters:
-                        logger.info(f"Found keyboard device: {dev.name} ({path})")
+                        if log_found:
+                            logger.info(f"Found keyboard device: {dev.name} ({path})")
                         devices.append(dev)
                     else:
                         logger.debug(f"Skipped non-keyboard device: {dev.name} ({path})")
@@ -194,7 +199,7 @@ class HotkeyListener:
         """Re-scan for newly connected keyboard devices (e.g. Bluetooth)."""
         try:
             current_paths = {dev.path for dev in self._devices}
-            new_devices = self._find_keyboard_devices()
+            new_devices = self._find_keyboard_devices(log_found=False)
             for dev in new_devices:
                 if dev.path not in current_paths:
                     logger.info(f"New keyboard device discovered: {dev.name} ({dev.path})")

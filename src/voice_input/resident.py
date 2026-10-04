@@ -87,10 +87,7 @@ class ASRSessionRelay:
                 logger.warning("resident ASR session failed, retrying warm in 3s...")
                 time.sleep(3)
                 self.warm()
-        else:
-            # 会话启动成功 → 启动后台过期回收心跳（默认 8s，讯飞 IAT ~10s 空闲踢连接）
-            if self._stale_max_age_s > 0:
-                self._schedule_stale_check(self._stale_max_age_s)
+        # 懒连接模式:不再调度后台 stale check（由 finish_segment 的 close_connection=True 保证连接释放）
 
     def send_audio(self, pcm_bytes: bytes) -> None:
         """Send PCM to the current session if one is active."""
