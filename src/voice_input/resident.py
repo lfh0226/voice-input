@@ -82,9 +82,10 @@ class ASRSessionRelay:
                 session.cleanup()
             except Exception:
                 logger.debug("failed session cleanup", exc_info=True)
-            # 连接失败自动重试一次（防止 warm 失败后 relay 永久死亡）
+            # 连接失败自动重试（防止 warm 失败后 relay 永久死亡），带退避避免限流
             if not self._stopped:
-                logger.warning("resident ASR session failed, retrying warm...")
+                logger.warning("resident ASR session failed, retrying warm in 3s...")
+                time.sleep(3)
                 self.warm()
         else:
             # 会话启动成功 → 启动后台过期回收心跳（默认 8s，讯飞 IAT ~10s 空闲踢连接）
@@ -118,7 +119,9 @@ class ASRSessionRelay:
     def _finalize_session(self, session: object) -> None:
         try:
             text = session.stop(
-                close_connection=not self._reuse_connection,
+                # 旧会话必须关闭连接！relay 每次创建新会话，旧连接如果
+                # 不关闭会持续累积 → 讯飞并发限制 → licc failed (code 11201)
+                close_connection=True,
                 final_result_timeout=self._final_result_timeout,
             )
         except Exception:
@@ -168,6 +171,13 @@ class ASRSessionRelay:
         timer.daemon = True
         timer.start()
         self._stale_timer = timer
+
+    def stop_heartbeat(self) -> None:
+        """停止后台过期回收心跳。"""
+        with self._lock:
+            if self._stale_timer:
+                self._stale_timer.cancel()
+                self._stale_timer = None
 
     def start_heartbeat(self) -> None:
         """启动后台过期回收心跳（在应用 start() 后调用一次）。"""

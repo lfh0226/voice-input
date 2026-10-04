@@ -130,7 +130,6 @@ class StreamingVoiceInput:
                 reuse_connection=True,
                 stale_max_age_s=8.0,
             )
-            self.resident_relay.warm()
             self._relay_warmed_at = time.time()
 
         # 运行状态
@@ -223,7 +222,9 @@ class StreamingVoiceInput:
 
         # 预热会话接力:回收过期空闲会话(讯飞服务端 ~10s 超时,8s 内必须回收),保证 Alt 按下即有热连接
         if use_relay:
-            self.resident_relay.recycle_if_stale(max_age_s=8.0)
+            # 懒连接策略:按 Alt 时如果没有活会话,立即 warm 一个(音频由 prebuffer 兜住)
+            if not self.resident_relay.is_ready:
+                self.resident_relay.warm()
             self._relay_gate = True
             self._resident_committed_len = 0
             self._last_commit_ts = time.time()
@@ -507,9 +508,8 @@ class StreamingVoiceInput:
         )
         self.hotkey_listener.start()
 
-        # 启动预热会话后台过期回收心跳（8s 后自动接力新会话,保证 Alt 按下始终有热连接）
-        if self.resident_relay:
-            self.resident_relay.start_heartbeat()
+        # 懒连接策略:不再启动后台心跳(避免空闲期间持续创建/销毁 WS 连接触发讯飞限流)
+        # 连接只在用户按 Alt 时按需创建,释放后立即关闭
 
         self._running = True
         logger.info(f"语音输入已就绪，按住 {self.config.hotkey.get('trigger', 'alt')} 开始录音")
