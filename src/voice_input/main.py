@@ -7,6 +7,7 @@ import logging
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -67,6 +68,7 @@ class StreamingVoiceInput:
         self._last_commit_ts = 0.0
         self._fcitx5_remote = shutil.which("fcitx5-remote")
         self._original_im = ""  # 语音输入前记住原 IM，commit 后恢复
+        self._im_restored = True  # 初始状态视为已恢复（防止误触发）
 
         # 流式录音器
         self.recorder = StreamingRecorder(
@@ -238,6 +240,7 @@ class StreamingVoiceInput:
                     [self._fcitx5_remote, "-n"], capture_output=True, text=True, timeout=1
                 )
                 self._original_im = result.stdout.strip() if result.returncode == 0 else ""
+                self._im_restored = False  # 新会话开始,IM 未恢复
                 logger.debug("记住原 IM: %s", self._original_im)
                 subprocess.run(
                     [self._fcitx5_remote, "-s", "voice"], capture_output=True, timeout=1
@@ -327,6 +330,8 @@ class StreamingVoiceInput:
 
     def _restore_original_im(self):
         """语音输入完成后恢复用户原来的输入法（对用户完全透明）。"""
+        if self._im_restored:
+            return  # 已恢复过,避免重复调用
         if not self._fcitx5_remote or not self._original_im:
             return
         try:
@@ -336,8 +341,19 @@ class StreamingVoiceInput:
             )
             logger.debug("恢复原 IM: %s", self._original_im)
             timeline.mark("IM 已恢复原输入法")
+            self._im_restored = True
         except Exception as e:
             logger.debug(f"恢复 IM 失败: {e}")
+
+    def _schedule_im_restore_fallback(self, delay_s: float = 5.0):
+        """安全兜底:final commit 万一没发生,延时后强制恢复 IM。"""
+        def _restore():
+            if not self._im_restored:
+                logger.warning("final commit 未触发 IM 恢复,使用兜底恢复")
+                self._restore_original_im()
+        timer = threading.Timer(delay_s, _restore)
+        timer.daemon = True
+        timer.start()
 
     def _on_relay_result(self, text: str, is_final: bool) -> None:
         """relay 会话的流式结果回调(热键门控模式)."""
@@ -419,8 +435,10 @@ class StreamingVoiceInput:
                 # 快照当前 committed_len 供 finalize 使用(防竞态)
                 self._pending_final_committed = self._resident_committed_len
                 self.resident_relay.finish_segment()
-            # 恢复原输入法（用户无感，不改变语音输入前的 IM 状态）
-            self._restore_original_im()
+            # 注意: 不在这里恢复 IM! finish_segment 的 final commit 是后台异步的,
+            # 必须等 _on_relay_final 的 commit 完成后再恢复(那里已调用 _restore_original_im)
+            # 如果在这里提前恢复, IM 已切回原输入法, final commit 会静默丢失
+            self._schedule_im_restore_fallback(5.0)
             return
 
         if not self._is_recording:
