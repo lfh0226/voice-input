@@ -280,11 +280,17 @@ class StreamingVoiceInput:
         if use_relay:
             # relay 模式:音频走预热会话,不再创建旧 streamer 连接（避免产生无人使用的
             # 空闲 WS 连接,该连接 20s 后被讯飞服务端踢掉并产生 "server read msg timeout"）
-            if not self.recorder.start():
-                logger.error("relay 模式启动录音失败")
-                self._relay_gate = False
-                self._is_recording = False
-                self.sound.play_error()
+            # 录音器永久保持开启(start() 中启动一次):反复 open/close ALSA 设备
+            # 会导致流打开成功但不产生回调数据(间歇性 0 音频帧)。gate 关闭时
+            # 音频块在回调中立即丢弃,不存储不发送,隐私合规。
+            if not self.recorder.is_recording:
+                if not self.recorder.start():
+                    logger.error("relay 模式启动录音失败")
+                    self._relay_gate = False
+                    self._is_recording = False
+                    self.sound.play_error()
+                else:
+                    logger.info("录音器已启动(常驻模式,音频仅在 gate 打开时发送)")
             return
 
         # 创建流式识别器
@@ -406,8 +412,8 @@ class StreamingVoiceInput:
             self._relay_gate = False
             self._is_recording = False
             timeline.mark("热键松开,停止本地采集")
-            # 停止本地采集(合规:按键松开即停止采集)
-            self.recorder.stop()
+            # gate 关闭:音频块在回调中立即丢弃(录音器保持开启避免 ALSA 设备反复
+            # open/close 导致的间歇性无声流),不存储不发送,隐私合规
             self.sound.play_end()
             if self.resident_relay:
                 # 快照当前 committed_len 供 finalize 使用(防竞态)
@@ -532,6 +538,11 @@ class StreamingVoiceInput:
             on_release=self._on_hotkey_release,
             mode=self.config.hotkey.get("mode", "hold"),
         )
+        
+        # 录音器常驻启动:避免每次按 Alt 反复 open/close ALSA 设备
+        # （反复开关会导致流打开成功但不产生回调数据 → 间歇性 0 音频帧）
+        if not self.recorder.start():
+            logger.warning("录音器启动失败,将在首次按键时重试")
         self.hotkey_listener.start()
 
         # 懒连接策略:不再启动后台心跳(避免空闲期间持续创建/销毁 WS 连接触发讯飞限流)
