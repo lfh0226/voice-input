@@ -69,6 +69,7 @@ class StreamingVoiceInput:
         self._fcitx5_remote = shutil.which("fcitx5-remote")
         self._original_im = ""  # 语音输入前记住原 IM，commit 后恢复
         self._im_restored = True  # 初始状态视为已恢复（防止误触发）
+        self._im_restore_timer: threading.Timer | None = None
 
         # 流式录音器
         self.recorder = StreamingRecorder(
@@ -347,6 +348,9 @@ class StreamingVoiceInput:
 
     def _schedule_im_restore_fallback(self, delay_s: float = 5.0):
         """安全兜底:final commit 万一没发生,延时后强制恢复 IM。"""
+        # 取消上一次会话遗留的兜底定时器(避免它在当前会话工作时恢复 IM 导致丢字)
+        if self._im_restore_timer:
+            self._im_restore_timer.cancel()
         def _restore():
             if not self._im_restored:
                 logger.warning("final commit 未触发 IM 恢复,使用兜底恢复")
@@ -354,6 +358,7 @@ class StreamingVoiceInput:
         timer = threading.Timer(delay_s, _restore)
         timer.daemon = True
         timer.start()
+        self._im_restore_timer = timer
 
     def _on_relay_result(self, text: str, is_final: bool) -> None:
         """relay 会话的流式结果回调(热键门控模式)."""
